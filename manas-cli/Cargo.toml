@@ -1,13 +1,18 @@
 [package]
 name = "manas-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Manas CLI — command-line interface for the personal AI brain"
 
 [dependencies]
-manas-core = { path = "../manas-core" }
-manas-memory = { path = "../manas-memory" }
-manas-store = { path = "../manas-store" }
-manas-learn = { path = "../manas-learn" }
-manas-ingest = { path = "../manas-ingest" }
-manas-agent = { path = "../manas-agent" }
+manas-core = { workspace = true }
+manas-memory = { workspace = true }
+manas-store = { workspace = true }
+manas-learn = { workspace = true }
+manas-ingest = { workspace = true }
+manas-agent = { workspace = true }
 clap = { version = "4", features = ["derive"] }

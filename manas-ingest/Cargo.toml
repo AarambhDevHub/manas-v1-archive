@@ -1,11 +1,16 @@
 [package]
 name = "manas-ingest"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Manas ingest — unified input pipeline for text, files, folders, URLs"
 
 [dependencies]
-manas-core = { path = "../manas-core" }
-manas-learn = { path = "../manas-learn" }
+manas-core = { workspace = true }
+manas-learn = { workspace = true }
 serde_json = "1"
 toml = "0.8"
 csv = "1"

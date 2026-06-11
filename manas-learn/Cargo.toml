@@ -1,10 +1,15 @@
 [package]
 name = "manas-learn"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Manas learn — tokenizer, embedder, backpropagation, online learning, decoder"
 
 [dependencies]
-manas-core = { path = "../manas-core" }
-manas-memory = { path = "../manas-memory" }
-manas-store = { path = "../manas-store" }
+manas-core = { workspace = true }
+manas-memory = { workspace = true }
+manas-store = { workspace = true }
 rand = "0.8"

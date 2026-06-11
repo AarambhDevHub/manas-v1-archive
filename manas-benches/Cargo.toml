@@ -1,14 +1,20 @@
 [package]
 name = "manas-benches"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Manas benchmarks — performance benchmarks for all crates"
+publish = false
 
 [dependencies]
-manas-core = { path = "../manas-core" }
-manas-learn = { path = "../manas-learn" }
-manas-store = { path = "../manas-store" }
-manas-ingest = { path = "../manas-ingest" }
-manas-memory = { path = "../manas-memory" }
+manas-core = { workspace = true }
+manas-learn = { workspace = true }
+manas-store = { workspace = true }
+manas-ingest = { workspace = true }
+manas-memory = { workspace = true }
 
 [[bench]]
 name = "bench"

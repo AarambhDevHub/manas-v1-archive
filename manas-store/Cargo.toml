@@ -1,8 +1,13 @@
 [package]
 name = "manas-store"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Manas store — .manas binary format, append-only I/O, CRC32 integrity"
 
 [dependencies]
-manas-core = { path = "../manas-core" }
+manas-core = { workspace = true }
 crc32fast = "1.4"
