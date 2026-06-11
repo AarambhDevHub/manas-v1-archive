@@ -1,0 +1,1306 @@
+# ARCHITECTURE.md — Manas
+
+> **"A self-growing, never-forgetting, always-updated personal AI brain"**
+>
+> Manas (Sanskrit: *मनस्* — mind, intellect, the seat of thought) is a self-growing neural
+> network written in Rust that starts with zero knowledge, learns from text, local files,
+> and the internet, never forgets, and stays current automatically.
+
+---
+
+## Table of Contents
+
+1. [Vision](#1-vision)
+2. [Core Principles](#2-core-principles)
+3. [System Overview](#3-system-overview)
+4. [Full Architecture Diagram](#4-full-architecture-diagram)
+5. [Crate Structure](#5-crate-structure)
+6. [Crate Details](#6-crate-details)
+   - [manas-core](#61-manas-core)
+   - [manas-memory](#62-manas-memory)
+   - [manas-store](#63-manas-store)
+   - [manas-learn](#64-manas-learn)
+   - [manas-ingest](#65-manas-ingest)
+   - [manas-agent](#66-manas-agent)
+   - [manas-cli](#67-manas-cli)
+7. [The .manas Binary Format](#7-the-manas-binary-format)
+8. [The Growth System](#8-the-growth-system)
+9. [The Memory Importance System](#9-the-memory-importance-system)
+10. [The Freshness System](#10-the-freshness-system)
+11. [The Local File Ingestion System](#11-the-local-file-ingestion-system)
+12. [The Internet Agent System](#12-the-internet-agent-system)
+13. [Data Flow — Full Pipeline](#13-data-flow--full-pipeline)
+14. [Neuron Lifecycle](#14-neuron-lifecycle)
+15. [Error Handling Strategy](#15-error-handling-strategy)
+16. [Milestone Plan](#16-milestone-plan)
+17. [CLI Reference](#17-cli-reference)
+18. [Future Vision](#18-future-vision)
+
+---
+
+## 1. Vision
+
+Current AI models are:
+
+- Pre-trained on fixed datasets — they cannot learn new things after training
+- Static in size — their parameter count is frozen forever
+- Cloud-dependent — they require expensive APIs or servers
+- Forgetful — fine-tuning on new data destroys old knowledge (catastrophic forgetting)
+- Disconnected from the present — their knowledge has a hard cutoff date
+
+**Manas solves all five problems at once:**
+
+| Problem | Manas Solution |
+|---|---|
+| Can't learn after training | Online learning — learns from any input in real time |
+| Fixed parameter count | Dynamic growth — adds neurons when needed |
+| Cloud dependent | 100% local — runs on your laptop |
+| Catastrophic forgetting | Importance scoring — protected neurons are never overwritten |
+| Stale knowledge | Freshness system — auto re-searches outdated knowledge |
+
+The end result is a **personal AI brain** that lives on your machine in a single `.manas` file,
+starts at ~1 KB, and grows intelligently as you teach it — forever.
+
+---
+
+## 2. Core Principles
+
+### Principle 1 — Never Forget
+Every piece of knowledge is permanently saved. No weight is ever silently overwritten.
+If a neuron must change, its old state is archived before updating.
+
+### Principle 2 — Grow When Needed
+The network never hits a capacity ceiling. When it cannot represent something well
+(measured by loss), it grows a new neuron instead of forcing existing neurons to compromise.
+
+### Principle 3 — Stay Fresh
+All time-sensitive knowledge has a timestamp and a freshness category. Stale knowledge
+triggers a silent internet re-search before being used to answer.
+
+### Principle 4 — Learn from Anywhere
+Text comes from three sources and all are treated equally by the learning pipeline:
+- Raw text typed by the user
+- Local files and folders on disk
+- Live internet pages fetched by the agent
+
+### Principle 5 — Full Local Ownership
+The model is a single `.manas` file on disk. No cloud, no account, no API key required
+for inference. The user owns their brain completely.
+
+---
+
+## 3. System Overview
+
+```
+Input Sources
+─────────────
+  [Raw Text]  [Local Files / Folders]  [Internet]
+       │               │                   │
+       └───────────────┼───────────────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │  manas-ingest   │  ← unified input pipeline
+              │  (normalize,    │     cleans and tokenizes
+              │   tokenize,     │     all input sources
+              │   tag source)   │
+              └────────┬────────┘
+                       │
+                       ▼
+              ┌─────────────────┐
+              │  manas-learn    │  ← online backpropagation
+              │  (backprop,     │     one sample at a time
+              │   loss calc,    │     signals core to grow
+              │   growth signal)│     when loss is too high
+              └────────┬────────┘
+                       │
+              ┌────────┴────────┐
+              │                 │
+              ▼                 ▼
+    ┌──────────────┐   ┌──────────────────┐
+    │  manas-core  │   │  manas-memory    │
+    │  (neurons,   │   │  (importance     │
+    │   layers,    │   │   scoring,       │
+    │   growth,    │   │   protection,    │
+    │   forward    │   │   compression)   │
+    │   pass)      │   └──────────────────┘
+    └──────┬───────┘
+           │
+           ▼
+  ┌────────────────┐
+  │  manas-store   │  ← custom .manas binary
+  │  (.manas file, │     append-only growth
+  │   read/write,  │     full neuron metadata
+  │   append)      │
+  └────────────────┘
+```
+
+---
+
+## 4. Full Architecture Diagram
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                         Manas System                               │
+│                                                                    │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │                       manas-cli                             │  │
+│  │   learn | query | ingest | refresh | inspect | export       │  │
+│  └───────────────────────────┬─────────────────────────────────┘  │
+│                               │                                    │
+│          ┌────────────────────┼────────────────────┐              │
+│          │                    │                    │              │
+│          ▼                    ▼                    ▼              │
+│  ┌──────────────┐   ┌──────────────────┐  ┌──────────────────┐   │
+│  │ manas-ingest │   │   manas-agent    │  │  manas-memory    │   │
+│  │              │   │                  │  │                  │   │
+│  │ • raw text   │   │ • web search     │  │ • importance     │   │
+│  │ • .txt .md   │   │ • html scrape    │  │   scoring        │   │
+│  │ • .rs .toml  │   │ • freshness      │  │ • neuron         │   │
+│  │ • .json .csv │   │   checker        │  │   protection     │   │
+│  │ • .pdf .html │   │ • feeds ingest   │  │ • compression    │   │
+│  │ • folder     │   │   pipeline       │  │   of cold        │   │
+│  │   recursive  │   │                  │  │   neurons        │   │
+│  └──────┬───────┘   └────────┬─────────┘  └────────┬─────────┘   │
+│         │                    │                     │              │
+│         └────────────────────┼─────────────────────┘              │
+│                              │                                    │
+│                              ▼                                    │
+│                   ┌──────────────────────┐                        │
+│                   │     manas-learn      │                        │
+│                   │                      │                        │
+│                   │ • tokenizer          │                        │
+│                   │ • embedding          │                        │
+│                   │ • forward pass       │                        │
+│                   │ • loss calculation   │                        │
+│                   │ • backpropagation    │                        │
+│                   │ • growth signal      │                        │
+│                   └──────────┬───────────┘                        │
+│                              │                                    │
+│                              ▼                                    │
+│                   ┌──────────────────────┐                        │
+│                   │      manas-core      │                        │
+│                   │                      │                        │
+│                   │ • Neuron struct       │                        │
+│                   │ • Layer struct        │                        │
+│                   │ • Network struct      │                        │
+│                   │ • forward()           │                        │
+│                   │ • grow_neuron()       │                        │
+│                   │ • update_weights()    │                        │
+│                   └──────────┬───────────┘                        │
+│                              │                                    │
+│                              ▼                                    │
+│                   ┌──────────────────────┐                        │
+│                   │     manas-store      │                        │
+│                   │                      │                        │
+│                   │ • .manas file I/O    │                        │
+│                   │ • header r/w         │                        │
+│                   │ • neuron append      │                        │
+│                   │ • full load/save     │                        │
+│                   │ • integrity check    │                        │
+│                   └──────────────────────┘                        │
+│                              │                                    │
+│                         [brain.manas]                             │
+│                    starts: ~1 KB                                  │
+│                    grows:  forever                                 │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5. Crate Structure
+
+```
+manas/
+├── Cargo.toml                  ← workspace root
+├── ARCHITECTURE.md             ← this file
+├── ROADMAP.md
+├── README.md
+│
+├── manas-core/                 ← neurons, layers, growth, forward pass
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── neuron.rs
+│       ├── layer.rs
+│       ├── network.rs
+│       └── activation.rs
+│
+├── manas-memory/               ← importance scoring, protection, compression
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── scorer.rs
+│       ├── protector.rs
+│       └── compressor.rs
+│
+├── manas-store/                ← .manas binary format, file I/O
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── format.rs
+│       ├── reader.rs
+│       ├── writer.rs
+│       └── integrity.rs
+│
+├── manas-learn/                ← tokenizer, backprop, online learning loop
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── tokenizer.rs
+│       ├── embedder.rs
+│       ├── backprop.rs
+│       └── trainer.rs
+│
+├── manas-ingest/               ← unified input pipeline (text, files, folders)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── raw_text.rs
+│       ├── file_reader.rs
+│       ├── folder_walker.rs
+│       ├── format/
+│       │   ├── markdown.rs
+│       │   ├── plaintext.rs
+│       │   ├── rust_source.rs
+│       │   ├── json.rs
+│       │   ├── toml.rs
+│       │   ├── csv.rs
+│       │   └── html.rs
+│       └── normalizer.rs
+│
+├── manas-agent/                ← internet search, html scraping, freshness
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── searcher.rs
+│       ├── scraper.rs
+│       ├── freshness.rs
+│       └── pipeline.rs
+│
+└── manas-cli/                  ← command line interface
+    ├── Cargo.toml
+    └── src/
+        └── main.rs
+```
+
+---
+
+## 6. Crate Details
+
+### 6.1 `manas-core`
+
+The neural network engine. The actual brain.
+
+#### Key Structs
+
+```rust
+/// A single neuron — the atomic unit of Manas
+pub struct Neuron {
+    pub id:               u64,
+    pub weights:          Vec<f32>,
+    pub bias:             f32,
+    pub activation:       Activation,
+
+    // memory metadata
+    pub importance_score: f32,
+    pub born_at:          u64,       // unix timestamp
+    pub last_activated:   u64,       // unix timestamp
+    pub activation_count: u64,       // total times this neuron has fired
+
+    // knowledge metadata
+    pub learned_at:           u64,   // when it first absorbed this knowledge
+    pub last_verified:        u64,   // when it last re-checked internet
+    pub freshness_category:   u8,    // 0=timeless 1=slow 2=fast 3=realtime
+    pub source:               Source, // where the knowledge came from
+    pub is_protected:         bool,  // if true, weights cannot be modified
+}
+
+/// A layer of neurons
+pub struct Layer {
+    pub id:         u32,
+    pub neurons:    Vec<Neuron>,
+    pub activation: Activation,
+}
+
+/// The full network
+pub struct Network {
+    pub layers:        Vec<Layer>,
+    pub total_neurons: u64,
+    pub created_at:    u64,
+    pub version:       u8,
+}
+
+/// Where knowledge came from
+pub enum Source {
+    RawText,
+    LocalFile { path: String },
+    Internet  { url: String },
+    Unknown,
+}
+
+/// Activation function type
+pub enum Activation {
+    ReLU,
+    Sigmoid,
+    Tanh,
+    Linear,
+}
+```
+
+#### Key Methods
+
+```rust
+impl Network {
+    /// Run a forward pass — inference
+    pub fn forward(&self, input: &[f32]) -> Vec<f32>;
+
+    /// Add a new neuron to a specific layer
+    pub fn grow_neuron(&mut self, layer_id: u32, input_size: usize);
+
+    /// Add a completely new layer
+    pub fn grow_layer(&mut self, neuron_count: usize);
+
+    /// Update weights of a specific neuron (respects is_protected)
+    pub fn update_weights(&mut self, neuron_id: u64, delta: &[f32]);
+
+    /// Record that a neuron was activated (updates last_activated, count)
+    pub fn record_activation(&mut self, neuron_id: u64);
+
+    /// Total parameter count across all neurons
+    pub fn parameter_count(&self) -> u64;
+}
+```
+
+#### Growth Trigger Logic
+
+```
+After each forward pass → calculate MSE loss
+
+IF loss > GROWTH_THRESHOLD (default: 0.35)
+    AND we tried updating weights 3 times and loss stayed high
+THEN
+    find the layer with highest average loss contribution
+    grow_neuron(that_layer_id, input_size)
+    re-run forward pass
+    save to .manas
+```
+
+---
+
+### 6.2 `manas-memory`
+
+The importance system. Decides which neurons matter and which can be compressed.
+
+#### Importance Score Calculation
+
+Each neuron's importance score is a weighted combination of:
+
+```
+importance = (
+    0.40 * activation_frequency    +   // how often it fires
+    0.30 * recency_score           +   // how recently it fired
+    0.20 * weight_magnitude        +   // how large its weights are
+    0.10 * age_score                   // newer neurons get a grace period
+)
+```
+
+All values normalized to [0.0, 1.0].
+
+#### Protection Rules
+
+```rust
+pub enum ProtectionStatus {
+    /// Fully protected — no modification allowed
+    Frozen,
+
+    /// Softly protected — small updates only (max delta ±0.01)
+    Guarded,
+
+    /// Normal — full learning allowed
+    Open,
+}
+```
+
+A neuron is set to `Frozen` when:
+- `importance_score > 0.85`
+- `activation_count > 10_000`
+- `is_protected == true` (manually set)
+
+A neuron is set to `Guarded` when:
+- `importance_score > 0.60`
+- `age < 7 days` (newly born neurons, protected while settling)
+
+#### Compression
+
+When the model reaches a user-defined size limit:
+
+1. Find all neurons with `importance_score < 0.10`
+2. Cluster similar neurons by weight cosine similarity
+3. Merge clusters into a single averaged neuron
+4. Archive the originals in a separate `.manas.archive` section
+5. Total neuron count decreases, but no knowledge is permanently destroyed
+
+---
+
+### 6.3 `manas-store`
+
+The custom binary file format. Reads and writes `.manas` files.
+
+#### File Layout
+
+```
+[FILE HEADER]         fixed 64 bytes
+[LAYER INDEX]         variable — list of layer positions in file
+[LAYER BLOCK] × N    each layer's neuron data
+[ARCHIVE BLOCK]       compressed/merged old neurons
+[CHECKSUM]            CRC32 of entire file
+```
+
+Full byte-level format is documented in [Section 7](#7-the-manas-binary-format).
+
+#### Key Operations
+
+```rust
+pub struct ManasBrain {
+    pub path: PathBuf,
+}
+
+impl ManasBrain {
+    /// Load full network from .manas file
+    pub fn load(&self) -> Result<Network>;
+
+    /// Save full network to .manas file
+    pub fn save(&self, network: &Network) -> Result<()>;
+
+    /// Append a single new neuron without rewriting whole file
+    pub fn append_neuron(&self, layer_id: u32, neuron: &Neuron) -> Result<()>;
+
+    /// Update a single neuron's weights in-place
+    pub fn update_neuron(&self, neuron_id: u64, neuron: &Neuron) -> Result<()>;
+
+    /// Verify file integrity via checksum
+    pub fn verify(&self) -> Result<bool>;
+
+    /// Print human-readable stats
+    pub fn inspect(&self) -> Result<BrainStats>;
+}
+```
+
+#### Append-Only Growth Strategy
+
+When a new neuron is grown, Manas does **not** rewrite the whole file.
+It seeks to the end of the last layer block and appends the new neuron bytes,
+then updates the layer's neuron count in the header.
+
+This means `.manas` files grow incrementally with zero full-file rewrites.
+
+---
+
+### 6.4 `manas-learn`
+
+The learning engine. Converts text into knowledge and updates the network.
+
+#### Pipeline
+
+```
+Raw text string
+      │
+      ▼
+ Tokenizer
+ (split into tokens, lowercase, strip noise)
+      │
+      ▼
+ Embedder
+ (convert tokens to f32 vectors via simple lookup table)
+      │
+      ▼
+ Forward pass  →  prediction vector
+      │
+      ▼
+ Loss function  →  MSE loss value
+      │
+      ▼
+ Backpropagation  →  weight deltas
+      │
+      ▼
+ Growth check
+    loss > threshold?
+    YES → signal manas-core to grow neuron
+    NO  → apply deltas directly
+      │
+      ▼
+ manas-memory checks protection status before applying
+      │
+      ▼
+ manas-store saves updated weights
+```
+
+#### Tokenizer
+
+A lightweight tokenizer — no BPE, no external model.
+
+```rust
+pub struct Tokenizer {
+    pub vocab: HashMap<String, u32>,   // token → id
+    pub vocab_size: u32,               // grows as new words are seen
+}
+
+impl Tokenizer {
+    /// Tokenize a string → list of token ids
+    pub fn encode(&mut self, text: &str) -> Vec<u32>;
+
+    /// New token seen → add to vocab, grow vocab_size
+    pub fn learn_token(&mut self, token: &str) -> u32;
+}
+```
+
+Every new word the model sees is added to the vocab. The vocab itself is stored inside
+the `.manas` file and grows alongside the network.
+
+#### Embedder
+
+Maps token ids to f32 vectors.
+
+```rust
+pub struct Embedder {
+    pub dim: usize,                          // embedding dimension, default 64
+    pub table: HashMap<u32, Vec<f32>>,       // token_id → embedding vector
+}
+```
+
+New tokens get a randomly initialized embedding vector when first seen.
+The embedder is trained alongside the network via backpropagation.
+
+---
+
+### 6.5 `manas-ingest`
+
+The unified input pipeline. Normalizes all input sources into clean text before
+handing off to `manas-learn`. This is where **local file learning** lives.
+
+#### Supported Input Sources
+
+| Source | Handler | Notes |
+|---|---|---|
+| Raw string | `raw_text.rs` | Direct pass-through |
+| `.txt` | `plaintext.rs` | Strip control chars |
+| `.md` | `markdown.rs` | Strip markdown syntax, keep text |
+| `.rs` | `rust_source.rs` | Extract doc comments + code structure |
+| `.toml` | `toml.rs` | Convert key-value pairs to text |
+| `.json` | `json.rs` | Flatten to key: value text |
+| `.csv` | `csv.rs` | Row-by-row text with headers |
+| `.html` | `html.rs` | Strip tags, extract visible text |
+| folder | `folder_walker.rs` | Recursive walk, all supported files |
+
+#### Local File Learning
+
+```rust
+pub enum IngestSource {
+    Text(String),
+    File(PathBuf),
+    Folder(PathBuf),
+    Url(String),         // handled by manas-agent, then re-enters here
+}
+
+pub struct IngestPipeline;
+
+impl IngestPipeline {
+    /// Ingest any source — returns stream of clean text chunks
+    pub fn process(&self, source: IngestSource) -> impl Iterator<Item = TextChunk>;
+}
+
+pub struct TextChunk {
+    pub text:       String,
+    pub source:     Source,       // tracks origin for neuron metadata
+    pub chunk_id:   u64,
+    pub file_path:  Option<String>,
+    pub url:        Option<String>,
+}
+```
+
+#### Folder Walker
+
+When a folder path is given, `folder_walker.rs` recursively walks the directory:
+
+```
+/my-notes/
+├── rust-notes.md       ✅ ingest
+├── ideas.txt           ✅ ingest
+├── config.toml         ✅ ingest
+├── data.csv            ✅ ingest
+├── images/
+│   └── diagram.png     ❌ skip (not text)
+└── subdir/
+    └── more-notes.md   ✅ ingest (recursive)
+```
+
+Each file is tagged with its path in the `Source::LocalFile { path }` field,
+so neurons know where their knowledge came from.
+
+#### CLI Usage for Local Learning
+
+```bash
+# Learn from a single file
+manas ingest --file ./notes.md
+
+# Learn from an entire folder recursively
+manas ingest --folder ./my-notes/
+
+# Learn from multiple sources at once
+manas ingest --folder ./rust-docs/ --folder ./personal-notes/ --file ./extra.md
+
+# Preview what would be ingested without actually learning
+manas ingest --folder ./my-notes/ --dry-run
+```
+
+---
+
+### 6.6 `manas-agent`
+
+The internet connection. Searches the web, scrapes clean text, and manages freshness.
+
+#### Web Search
+
+```rust
+pub struct Searcher;
+
+impl Searcher {
+    /// Search for a query and return top N result URLs
+    pub async fn search(&self, query: &str, top_n: usize) -> Result<Vec<SearchResult>>;
+}
+
+pub struct SearchResult {
+    pub url:     String,
+    pub title:   String,
+    pub snippet: String,
+}
+```
+
+#### Scraper
+
+```rust
+pub struct Scraper;
+
+impl Scraper {
+    /// Fetch a URL and extract clean readable text
+    pub async fn scrape(&self, url: &str) -> Result<String>;
+}
+```
+
+The scraper:
+1. Fetches the HTML with a standard HTTP client
+2. Strips all tags, scripts, styles, navigation
+3. Extracts only visible paragraph text
+4. Returns clean UTF-8 string to `manas-ingest`
+
+#### Freshness Checker
+
+```rust
+pub struct FreshnessChecker;
+
+impl FreshnessChecker {
+    /// Check all neurons — return list of stale neuron ids
+    pub fn find_stale(&self, network: &Network) -> Vec<u64>;
+
+    /// Refresh a specific neuron — re-search internet and re-learn
+    pub async fn refresh_neuron(&self, neuron_id: u64, network: &mut Network) -> Result<()>;
+
+    /// Refresh all stale neurons (called on query or on schedule)
+    pub async fn refresh_all_stale(&self, network: &mut Network) -> Result<RefreshReport>;
+}
+```
+
+---
+
+### 6.7 `manas-cli`
+
+The command line interface. The entry point for all user interaction.
+
+Full CLI reference is in [Section 17](#17-cli-reference).
+
+---
+
+## 7. The `.manas` Binary Format
+
+```
+Offset    Size     Field
+────────────────────────────────────────────────────────
+[FILE HEADER — 64 bytes fixed]
+0         5        magic bytes: "MANAS"
+5         1        format version: u8
+6         8        created_at: u64 (unix timestamp)
+14        8        last_modified: u64
+22        8        total_neurons: u64
+30        4        total_layers: u32
+34        4        vocab_size: u32
+38        8        total_texts_learned: u64
+46        2        flags: u16 (bit 0 = has_archive, bit 1 = compressed)
+48        4        checksum_offset: u32
+52        12       reserved (zero padded)
+
+[VOCAB BLOCK]
+0         4        vocab_entry_count: u32
+per entry:
+  4        token_len: u8
+  N        token bytes (UTF-8)
+  4        token_id: u32
+  64×4     embedding: [f32; 64]   (256 bytes)
+
+[LAYER INDEX]
+per layer:
+  4        layer_id: u32
+  8        byte_offset: u64       (where this layer's block starts)
+  4        neuron_count: u32
+
+[LAYER BLOCK × N]
+  4        layer_id: u32
+  4        neuron_count: u32
+  1        default_activation: u8
+
+  [NEURON BLOCK × M]
+    8        id: u64
+    2        weight_count: u16
+    W×4      weights: [f32]
+    4        bias: f32
+    1        activation: u8
+    4        importance_score: f32
+    8        born_at: u64
+    8        last_activated: u64
+    8        activation_count: u64
+    8        learned_at: u64
+    8        last_verified: u64
+    1        freshness_category: u8  (0=timeless,1=slow,2=fast,3=realtime)
+    1        source_type: u8         (0=text,1=file,2=internet,3=unknown)
+    2        source_len: u16
+    N        source_bytes (UTF-8 path or URL)
+    1        is_protected: u8        (0=false, 1=true)
+    1        protection_level: u8    (0=open, 1=guarded, 2=frozen)
+
+[ARCHIVE BLOCK]
+  (same format as LAYER BLOCK, for compressed/merged old neurons)
+
+[CHECKSUM — 4 bytes]
+  4        CRC32 of all bytes above
+```
+
+**File size growth:**
+Every new neuron adds approximately `(weight_count × 4) + ~100` bytes.
+A 128-weight neuron adds ~612 bytes. The file grows only by the new neuron's size.
+
+---
+
+## 8. The Growth System
+
+### When Growth Is Triggered
+
+```
+Each learning step:
+  1. Forward pass → get prediction
+  2. Calculate MSE loss
+  3. Backpropagate → get weight deltas
+  4. Apply deltas (if neuron not protected)
+  5. Re-calculate loss after update
+
+  IF new_loss > GROWTH_THRESHOLD (0.35)
+  AND update_attempts >= 3
+  AND layer_is_not_at_max_neurons:
+      → trigger grow_neuron(highest_loss_layer)
+      → re-run forward pass
+      → save
+```
+
+### New Neuron Initialization
+
+When a new neuron is grown:
+
+- Weights: randomly initialized from `N(0, 0.1)` (small Gaussian noise)
+- Bias: 0.0
+- Importance score: 0.5 (neutral — neither protected nor at risk)
+- Protection: `Guarded` for first 7 days (grace period while it settles)
+- `born_at`: current unix timestamp
+- Source: inherited from the input that triggered growth
+
+### Layer Growth
+
+If all neurons in every existing layer are `Frozen` and loss is still too high,
+a new layer is appended to the network. This is rarer than neuron growth within a layer.
+
+---
+
+## 9. The Memory Importance System
+
+### Importance Score Formula
+
+```
+importance = (
+    0.40 × clamp(activation_count / 10_000, 0.0, 1.0)   +
+    0.30 × recency(last_activated, now)                   +
+    0.20 × clamp(weight_l2_norm / 10.0, 0.0, 1.0)       +
+    0.10 × age_grace(born_at, now)
+)
+
+recency(t, now) = exp(-λ × (now - t) / 86400)   where λ = 0.1
+
+age_grace(born, now):
+    if (now - born) < 7_days  → return 1.0   (grace period)
+    else                      → return 0.0
+```
+
+### Score Bands
+
+| Score | Status | Meaning |
+|---|---|---|
+| 0.85 – 1.00 | 🔒 Frozen | Core knowledge, never touch |
+| 0.60 – 0.85 | 🛡 Guarded | Important, small updates only |
+| 0.20 – 0.60 | ✅ Open | Normal learning allowed |
+| 0.00 – 0.20 | 🗜 Compress candidate | Rarely used, may be merged |
+
+### Compression
+
+Compression is **never destructive**. Old neurons are moved to the `[ARCHIVE BLOCK]`
+inside the `.manas` file. They can be restored at any time with `manas restore`.
+
+---
+
+## 10. The Freshness System
+
+### Freshness Categories
+
+| Category | Label | Auto-refresh after | Example knowledge |
+|---|---|---|---|
+| 0 | Timeless | Never | Math, logic, language rules |
+| 1 | Slow | 30 days | Historical facts, geography |
+| 2 | Fast | 7 days | Technology, software versions, docs |
+| 3 | Realtime | 1 day | News, prices, current events |
+
+### Auto-detection
+
+When knowledge is first learned, the freshness category is auto-detected by
+scanning the input text for keywords:
+
+```
+"released", "version", "update", "latest" → category 2 (Fast)
+"news", "today", "breaking", "market"     → category 3 (Realtime)
+"since", "history", "was", "were"         → category 1 (Slow)
+"always", "formula", "law", "proof"       → category 0 (Timeless)
+default fallback                          → category 1 (Slow)
+```
+
+### Freshness Check on Query
+
+```
+User runs: manas query "What is the latest Rust version?"
+      │
+      ▼
+Retrieve relevant neurons
+      │
+      ▼
+For each neuron:
+  stale = (now - last_verified) > category_threshold
+      │
+    stale?
+   ┌──┴──┐
+  YES    NO
+   │      │
+   ▼      ▼
+Trigger  Use
+refresh  directly
+   │
+   ▼
+manas-agent searches internet
+   │
+   ▼
+manas-ingest normalizes result
+   │
+   ▼
+manas-learn re-learns on updated text
+   │
+   ▼
+neuron last_verified updated to now
+   │
+   ▼
+Answer with fresh knowledge
+```
+
+---
+
+## 11. The Local File Ingestion System
+
+### Supported File Types
+
+| Extension | Parser | What is extracted |
+|---|---|---|
+| `.txt` | plaintext | Full text content |
+| `.md` | markdown | Text with markdown syntax stripped |
+| `.rs` | rust_source | Doc comments (`///`, `//!`), function signatures, module structure |
+| `.toml` | toml | Key = value pairs converted to readable sentences |
+| `.json` | json | Flattened key: value text |
+| `.csv` | csv | Each row as a natural language sentence with headers |
+| `.html` | html | Visible paragraph text, headings, links text only |
+
+### Folder Walk Rules
+
+```
+Given: manas ingest --folder ./my-notes/
+
+1. Walk directory recursively (follows symlinks with cycle detection)
+2. For each file:
+   a. Check extension against supported list
+   b. If supported → read → parse → normalize → chunk → send to manas-learn
+   c. If unsupported → skip silently (log to debug output)
+3. Each chunk tagged with:
+   Source::LocalFile { path: "/absolute/path/to/file.md" }
+4. After folder walk complete → print summary:
+   "Ingested 47 files | 12,483 text chunks | 0 errors"
+```
+
+### Chunking Strategy
+
+Large files are split into chunks before learning, so neurons represent
+focused pieces of knowledge rather than one massive blob:
+
+```
+Default chunk size: 512 characters
+Overlap: 64 characters (context continuity between chunks)
+Split boundary: prefer sentence/paragraph boundaries
+```
+
+### Change Detection (re-ingest only what changed)
+
+Each ingested file gets a record stored in `.manas`:
+
+```rust
+pub struct IngestedFile {
+    pub path:          String,
+    pub last_seen:     u64,     // unix timestamp
+    pub file_hash:     u64,     // xxHash of file contents
+    pub chunk_count:   u32,
+}
+```
+
+On re-ingest, if `file_hash` is unchanged, the file is skipped.
+Only modified or new files are re-learned.
+
+---
+
+## 12. The Internet Agent System
+
+### Search Backend
+
+The agent uses a configurable search backend:
+
+```toml
+# ~/.config/manas/config.toml
+[agent]
+search_backend = "ddg"      # options: "ddg" (DuckDuckGo), "brave", "custom"
+max_results_per_query = 5
+scrape_timeout_secs = 10
+respect_robots_txt = true
+```
+
+### Full Agent Pipeline
+
+```
+User query OR stale neuron
+         │
+         ▼
+  Build search query
+  (if from neuron: use knowledge tags + topic keywords)
+         │
+         ▼
+  manas-agent::Searcher
+  → returns top 5 URLs + snippets
+         │
+         ▼
+  For each URL:
+    manas-agent::Scraper
+    → fetch HTML
+    → strip noise
+    → extract clean text
+         │
+         ▼
+  manas-ingest::IngestPipeline
+  → normalize text
+  → chunk into 512-char pieces
+  → tag source as Source::Internet { url }
+         │
+         ▼
+  manas-learn::Trainer
+  → learn from each chunk
+  → update or grow neurons
+         │
+         ▼
+  manas-store
+  → save updated .manas file
+```
+
+---
+
+## 13. Data Flow — Full Pipeline
+
+### Learning from local file
+
+```
+manas ingest --file ./notes.md
+         │
+         ▼
+manas-ingest:
+  read file → parse markdown → strip syntax → normalize text
+  → split into 512-char chunks
+  → tag each chunk: Source::LocalFile { path: "./notes.md" }
+         │
+         ▼
+manas-learn:
+  tokenize chunk → embed tokens → forward pass
+  → calculate loss → backprop → check growth
+         │
+         ▼
+manas-core:
+  if growth needed → grow_neuron()
+  else → update_weights() with protection check
+         │
+         ▼
+manas-memory:
+  recalculate importance scores for affected neurons
+         │
+         ▼
+manas-store:
+  append new neurons OR update existing neurons in .manas file
+```
+
+### Answering a query
+
+```
+manas query "What is ownership in Rust?"
+         │
+         ▼
+manas-learn:
+  tokenize query → embed → forward pass
+         │
+         ▼
+manas-agent::FreshnessChecker:
+  find relevant neurons → check last_verified vs threshold
+  any stale? → refresh from internet first
+         │
+         ▼
+manas-core:
+  forward pass with current weights → generate answer vector
+         │
+         ▼
+manas-learn:
+  decode output vector → produce text response
+         │
+         ▼
+manas-cli:
+  print answer to terminal
+```
+
+---
+
+## 14. Neuron Lifecycle
+
+```
+BORN
+ │  randomly initialized weights
+ │  importance_score = 0.5
+ │  protection = Guarded (7-day grace)
+ │
+ ▼
+LEARNING (days 0–7)
+ │  absorbing new patterns
+ │  protection prevents harsh overwriting
+ │  importance_score rising or falling based on activation
+ │
+ ▼
+SETTLED (day 7+)
+ │  protection drops to Open (unless score is high)
+ │  normal backprop updates apply
+ │  importance_score fully dynamic now
+ │
+ ├──► HIGH IMPORTANCE (score > 0.85)
+ │     → protection = Frozen
+ │     → never modified again
+ │     → permanent core knowledge
+ │
+ ├──► MEDIUM IMPORTANCE (score 0.20–0.85)
+ │     → stays Open
+ │     → continues to update
+ │     → re-scores every learning step
+ │
+ └──► LOW IMPORTANCE (score < 0.20)
+       → compress candidate
+       → merged with similar neurons
+       → archived in .manas archive block
+       → can be restored if needed
+```
+
+---
+
+## 15. Error Handling Strategy
+
+All public functions return `Result<T, ManasError>`.
+
+```rust
+pub enum ManasError {
+    // Storage errors
+    FileNotFound(PathBuf),
+    CorruptFile { path: PathBuf, reason: String },
+    ChecksumMismatch,
+
+    // Learning errors
+    TokenizerError(String),
+    EmbeddingError(String),
+    BackpropError(String),
+
+    // Ingest errors
+    UnsupportedFileType(String),
+    FileReadError { path: PathBuf, source: std::io::Error },
+
+    // Agent errors
+    NetworkError(String),
+    ScraperError(String),
+    SearchBackendError(String),
+
+    // Growth errors
+    GrowthFailed(String),
+    LayerLimitReached,
+}
+```
+
+No panics in library code. The CLI converts errors to user-friendly messages.
+
+---
+
+## 16. Milestone Plan
+
+| # | Milestone | Crates | Output |
+|---|---|---|---|
+| M1 | Neuron/layer/network structs, forward pass, growth logic | `manas-core` | Working dynamic neural net |
+| M2 | `.manas` binary format, read/write, append | `manas-store` | Persistent brain file |
+| M3 | Tokenizer, embedder, backprop, online learning loop | `manas-learn` | Model can learn from text |
+| M4 | Raw text + local file + folder ingestion pipeline | `manas-ingest` | Learn from disk |
+| M5 | Importance scoring, protection, compression | `manas-memory` | Never-forget system |
+| M6 | Full CLI — learn, ingest, query, inspect | `manas-cli` | Usable from terminal |
+| M7 | Internet search agent, HTML scraper | `manas-agent` | Web learning |
+| M8 | Freshness checker, auto re-search on stale knowledge | `manas-agent` | Always up to date |
+| M9 | Full integration, end-to-end testing | all | Complete working system |
+| M10 | Performance optimization, benchmarks | all | Production ready |
+
+---
+
+## 17. CLI Reference
+
+```bash
+# ── LEARNING ──────────────────────────────────────────────────────
+
+# Learn from raw text
+manas learn "Rust is a systems programming language"
+
+# Learn from a file
+manas ingest --file ./notes.md
+
+# Learn from a folder (recursive)
+manas ingest --folder ./my-notes/
+
+# Learn from a URL (agent fetches and cleans)
+manas ingest --url https://doc.rust-lang.org/book/
+
+# Preview ingest without learning
+manas ingest --folder ./docs/ --dry-run
+
+# ── QUERYING ──────────────────────────────────────────────────────
+
+# Ask a question
+manas query "What is ownership in Rust?"
+
+# Ask with forced freshness check
+manas query "Latest Rust version" --refresh
+
+# Ask without freshness check (faster, use cached knowledge only)
+manas query "What is a trait?" --no-refresh
+
+# ── MAINTENANCE ───────────────────────────────────────────────────
+
+# Refresh all stale knowledge from internet
+manas refresh
+
+# Refresh only a specific freshness category
+manas refresh --category fast
+
+# Show brain stats
+manas inspect
+# Output:
+#  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   Manas Brain — brain.manas
+#  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   Neurons       :  4,821
+#   Layers        :  8
+#   Vocab size    :  12,483
+#   Brain size    :  9.4 MB
+#   Texts learned :  31,209
+#   Files ingested:  47
+#   Last updated  :  2 hours ago
+#  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# List all ingested files
+manas files
+
+# Show where a piece of knowledge came from
+manas trace "Rust ownership"
+
+# ── FILE MANAGEMENT ───────────────────────────────────────────────
+
+# Export brain to a file
+manas export --out my_brain.manas
+
+# Import brain from a file
+manas import --file my_brain.manas
+
+# Verify file integrity
+manas verify
+
+# ── ADVANCED ──────────────────────────────────────────────────────
+
+# Show all neurons and their stats (verbose)
+manas neurons --all
+
+# Show neurons from a specific source
+manas neurons --source file:./notes.md
+
+# Restore archived neurons
+manas restore --all
+
+# Set freshness category manually for a topic
+manas tag "Rust version" --freshness fast
+```
+
+---
+
+## 18. Future Vision
+
+Once the core system (M1–M10) is complete, Manas can grow in these directions:
+
+### Phase 2 — Multi-Modal Input
+- Image input via CLIP-style embeddings
+- PDF native parser (beyond HTML conversion)
+- Audio transcription → text pipeline
+
+### Phase 3 — Multi-Brain Sync
+- Two Manas instances can share knowledge over local network
+- Team brain: multiple users contribute to a shared `.manas` file
+- Diff/merge two `.manas` files (like git for brains)
+
+### Phase 4 — Agent Mode
+- Manas proactively searches the internet on a schedule
+- Builds its own knowledge without user input
+- Monitors a list of topics and keeps them fresh automatically
+
+### Phase 5 — Vayu Integration
+- Reactive web UI (Leptos) for visual brain inspection
+- See neurons, layers, knowledge sources as interactive graph
+- Runs locally on `localhost:7070`
+
+---
+
+*Built with ❤️ in Rust. This is your brain. It lives on your machine. It grows with you.*

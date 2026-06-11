@@ -1,0 +1,8 @@
+[package]
+name = "manas-store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+manas-core = { path = "../manas-core" }
+crc32fast = "1.4"

@@ -1,0 +1,13 @@
+[package]
+name = "manas-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+manas-core = { path = "../manas-core" }
+manas-memory = { path = "../manas-memory" }
+manas-store = { path = "../manas-store" }
+manas-learn = { path = "../manas-learn" }
+manas-ingest = { path = "../manas-ingest" }
+manas-agent = { path = "../manas-agent" }
+clap = { version = "4", features = ["derive"] }

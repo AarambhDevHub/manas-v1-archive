@@ -1,0 +1,25 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Manas brain file
+*.manas
+brain.manas
+
+# Editor and OS files
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+*.iml
+*.orig
+*.bak
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log

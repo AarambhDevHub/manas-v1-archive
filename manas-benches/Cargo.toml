@@ -1,0 +1,15 @@
+[package]
+name = "manas-benches"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+manas-core = { path = "../manas-core" }
+manas-learn = { path = "../manas-learn" }
+manas-store = { path = "../manas-store" }
+manas-ingest = { path = "../manas-ingest" }
+manas-memory = { path = "../manas-memory" }
+
+[[bench]]
+name = "bench"
+harness = false

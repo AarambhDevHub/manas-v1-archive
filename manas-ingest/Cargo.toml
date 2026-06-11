@@ -1,0 +1,12 @@
+[package]
+name = "manas-ingest"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+manas-core = { path = "../manas-core" }
+manas-learn = { path = "../manas-learn" }
+serde_json = "1"
+toml = "0.8"
+csv = "1"
+walkdir = "2"

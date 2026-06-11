@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "manas-core",
+    "manas-memory",
+    "manas-store",
+    "manas-learn",
+    "manas-ingest",
+    "manas-agent",
+    "manas-cli",
+    "manas-benches",
+]

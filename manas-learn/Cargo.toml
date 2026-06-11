@@ -1,0 +1,10 @@
+[package]
+name = "manas-learn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+manas-core = { path = "../manas-core" }
+manas-memory = { path = "../manas-memory" }
+manas-store = { path = "../manas-store" }
+rand = "0.8"
