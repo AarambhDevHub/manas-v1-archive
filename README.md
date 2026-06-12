@@ -1,18 +1,24 @@
-# Manas — Your Personal AI Brain
+# Manas
 
 > *मनस् (manas) — mind, intellect, the seat of thought*
 
-**Manas is a self-growing neural network that learns from text, files, and the internet — 100% locally, one piece of knowledge at a time.**
+**Manas is an experimental self-growing local AI system that learns from text, files, and the internet — 100% locally, one piece of knowledge at a time.**
 
-Current AI models are pre-trained on fixed datasets, frozen in size, cloud-dependent, and disconnected from the present. Manas solves all five problems at once:
+> **Experimental Project Notice**
+>
+> Manas is an experimental Rust project exploring local-first learning, dynamic neural growth, source-aware memory, parameter tracking, and persistent `.manas` brain files.
+>
+> It is not a production-ready AI system and not a replacement for large language models.
+>
+> The project is currently a research/learning prototype. Features like self-growth, file ingestion, source-aware neurons, freshness tracking, and persistent memory are early implementations and may change over time.
 
-| Problem | Manas Solution |
+| Area | Approach |
 |---|---|
-| Can't learn after training | **Online learning** — learns from any input in real time |
-| Fixed parameter count | **Dynamic growth** — adds neurons when needed |
-| Cloud dependent | **100% local** — runs on your laptop, no API keys |
-| Catastrophic forgetting | **Importance scoring** — protected neurons never overwritten |
-| Stale knowledge | **Freshness system** — auto re-searches outdated knowledge |
+| Learning | **Online learning** — learns from any input in real time |
+| Capacity | **Dynamic growth** — adds neurons when needed |
+| Infrastructure | **100% local** — runs on your laptop, no API keys |
+| Memory | **Importance scoring** — designed to preserve learned knowledge |
+| Knowledge | **Freshness system** — re-searches outdated knowledge |
 
 ---
 
@@ -100,7 +106,7 @@ Manas is built from 7 Rust crates, each with a single responsibility:
 | **manas-store** | Custom `.manas` binary format — append-only read/write, CRC32 checksums |
 | **manas-learn** | Online learning — tokenizer, embedder, backpropagation, loss-driven growth, **decoder** |
 | **manas-ingest** | Input pipeline — 7 file format parsers, folder walker, text chunking |
-| **manas-memory** | Never-forget system — importance scoring, protection levels, compression |
+| **manas-memory** | Knowledge preservation — importance scoring, protection levels, compression |
 | **manas-agent** | Internet connection — DuckDuckGo search, HTML scraping, freshness checker |
 | **manas-cli** | Command-line interface — 13 commands for all operations |
 
@@ -133,7 +139,7 @@ Each neuron is the atomic unit of knowledge:
 - **Freshness category** — Timeless (never stale), Slow (30d), Fast (7d), Realtime (1d); set once alongside source, never overwritten
 - **Source** — where the knowledge came from (text, file, internet); set once alongside freshness, never overwritten
 
-### Never Forgetting
+### Knowledge Preservation
 
 ```
 Importance = 0.40 × activation_frequency
@@ -141,7 +147,7 @@ Importance = 0.40 × activation_frequency
            + 0.20 × weight_magnitude
            + 0.10 × age_grace
 
-Score ≥ 0.85 → Frozen. Never modified. Core knowledge is permanent.
+Score ≥ 0.85 → Frozen. Protected from modification. Core knowledge is preserved.
 Score ≥ 0.60 → Guarded. Small updates only (clamped deltas).
 Score < 0.60 → Open. Full learning allowed.
 Score < 0.10 → Compress candidate. Merged into archive (never deleted).
@@ -159,6 +165,27 @@ Knowledge is categorized by freshness:
 | Realtime (3) | 1 day | News, prices, events |
 
 Auto-detected from keywords in the text. Stale neurons trigger automatic internet re-search.
+
+---
+
+## Current Capabilities
+
+- **Learn from raw text** — tokenizes, embeds, forward pass, backprop, grows neurons as needed
+- **Ingest local files** — 7 format parsers (txt, md, json, html, csv, yaml, toml), folder walker, text chunking
+- **Persist state** — stores vocab, embeddings, neurons, and metadata in a single `.manas` file
+- **Source-aware growth** — grows a dedicated neuron per unique file or URL, retaining provenance
+- **Parameter tracking** — reports network params, embedding params, and total params
+- **Inspection commands** — `inspect`, `trace`, `neurons`, `files` give visibility into the network's state
+- **Freshness system** — categorizes knowledge (timeless/slow/fast/realtime) and flags stale neurons
+- **Web search & scrape** — queries DuckDuckGo, scrapes HTML, and ingests results
+
+## Current Limitations
+
+- **Query output is not local-first yet** — currently relies on web search rather than answering from the local network alone
+- **Answer generation is basic** — there is no generative text output; decoded tokens show the closest embeddings
+- **File/chunk learning is experimental** — chunking heuristics and per-chunk learning are still being refined
+- **One neuron per source is an anchor** — the source neuron acts as a pointer, not a full document understanding
+- **Not production-ready** — this is a research prototype; APIs, storage, and behavior may change
 
 ---
 
@@ -276,7 +303,7 @@ All benchmarks run in release mode on a standard laptop:
 - **Freshness** over staleness
 - **Simplicity** over complexity
 
-Your brain lives on your machine. It starts at ~1 KB and grows as you teach it — forever.
+Your local network lives on your machine. It starts at ~1 KB and grows as you teach it.
 
 ---
 
