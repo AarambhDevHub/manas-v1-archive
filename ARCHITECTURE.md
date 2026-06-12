@@ -613,17 +613,17 @@ trained embeddings rather than random initial values.
 
 #### Decoder
 
-Maps the network's output vector back to the closest known tokens — the brain's "answer."
+Finds tokens whose embeddings are closest to the query's embedding vector — the semantic neighborhood of the input.
 
 ```rust
 pub struct DecodeResult {
     pub tokens:      Vec<(String, f32)>,  // word + cosine similarity
-    pub output_norm: f32,                 // magnitude of output vector
+    pub output_norm: f32,                 // magnitude of query embedding vector
 }
 ```
 
 ```
-Query → Tokenize → Embed → Forward pass → Output vector
+Query → Tokenize → Embed → Average embedding
     → Cosine similarity with every token embedding
     → Sort by score → Return top 20 closest tokens
 ```

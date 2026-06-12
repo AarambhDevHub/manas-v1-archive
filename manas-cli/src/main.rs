@@ -440,15 +440,27 @@ fn cmd_inspect(brain_path: &Path) -> Result<(), ManasError> {
 
     match brain.inspect() {
         Ok(stats) => {
+            let network = brain.load().ok();
+            let net_params = network.as_ref().map(|n| n.parameter_count()).unwrap_or(0);
+
+            let embed_params = if let Ok(vocab) = brain.load_vocab() {
+                vocab.values().map(|(_, e)| e.len() as u64).sum::<u64>()
+            } else {
+                0
+            };
+
             println!("{}", "━".repeat(35));
             println!(" Manas Brain — {}", stats.file_path);
             println!("{}", "━".repeat(35));
-            println!(" Neurons       : {}", stats.neuron_count);
-            println!(" Layers        : {}", stats.layer_count);
-            println!(" Vocab size    : {}", stats.vocab_size);
-            println!(" Brain size    : {} bytes", stats.brain_size);
-            println!(" Texts learned : {}", stats.total_texts_learned);
-            println!(" Last updated  : {}", format_duration(stats.last_modified));
+            println!(" Neurons        : {}", stats.neuron_count);
+            println!(" Layers         : {}", stats.layer_count);
+            println!(" Vocab size     : {}", stats.vocab_size);
+            println!(" Network params : {}", net_params);
+            println!(" Embedding params: {}", embed_params);
+            println!(" Total params   : {}", net_params + embed_params);
+            println!(" Brain size     : {} bytes", stats.brain_size);
+            println!(" Texts learned  : {}", stats.total_texts_learned);
+            println!(" Last updated   : {}", format_duration(stats.last_modified));
             println!("{}", "━".repeat(35));
         }
         Err(ManasError::FileNotFound(_)) => {
@@ -545,7 +557,7 @@ fn cmd_trace(text: &str, brain_path: &Path) -> Result<(), ManasError> {
         }
     }
 
-    let result = decode(&network, &trainer.embedder, &trainer.tokenizer, text);
+    let result = decode(&trainer.embedder, &trainer.tokenizer, text);
     if !result.tokens.is_empty() {
         println!("\nClosest known tokens (decoded):");
         for (word, sim) in result.tokens.iter().take(10) {

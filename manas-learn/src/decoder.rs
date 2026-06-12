@@ -1,6 +1,5 @@
 use crate::embedder::Embedder;
 use crate::tokenizer::Tokenizer;
-use manas_core::Network;
 
 pub struct DecodeResult {
     pub tokens: Vec<(String, f32)>,
@@ -8,7 +7,6 @@ pub struct DecodeResult {
 }
 
 pub fn decode(
-    network: &Network,
     embedder: &Embedder,
     tokenizer: &Tokenizer,
     text: &str,
@@ -28,19 +26,13 @@ pub fn decode(
     }
     let input = temp_embedder.average_embed(&tokens);
 
-    if network.layers.is_empty() {
-        return DecodeResult {
-            tokens: Vec::new(),
-            output_norm: 0.0,
-        };
-    }
-
-    let output = network.forward(&input);
-    let output_norm: f32 = output.iter().map(|x| x * x).sum::<f32>().sqrt();
+    // Compare against the input embedding vector directly,
+    // so decoded tokens reflect the query's semantic neighborhood.
+    let input_norm: f32 = input.iter().map(|x| x * x).sum::<f32>().sqrt();
 
     let mut scored: Vec<(String, f32)> = Vec::new();
     for (&tid, emb) in &embedder.table {
-        let sim = cosine_similarity(&output, emb);
+        let sim = cosine_similarity(&input, emb);
         if let Some(word) = tokenizer.decode(tid) {
             scored.push((word.to_string(), sim));
         }
@@ -51,7 +43,7 @@ pub fn decode(
 
     DecodeResult {
         tokens: scored,
-        output_norm,
+        output_norm: input_norm,
     }
 }
 
