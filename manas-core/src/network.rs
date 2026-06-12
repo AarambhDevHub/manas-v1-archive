@@ -2,6 +2,7 @@ use crate::activation::Activation;
 use crate::error::ManasError;
 use crate::layer::Layer;
 use crate::neuron::{Neuron, ProtectionLevel};
+use rand::Rng;
 
 pub struct Network {
     pub layers: Vec<Layer>,
@@ -77,16 +78,31 @@ impl Network {
     pub fn grow_neuron(&mut self, layer_id: u32, input_size: usize) -> Result<u64, ManasError> {
         let id = self.alloc_id();
 
-        let layer = self
+        // Find the index of the target layer
+        let layer_idx = self
             .layers
-            .iter_mut()
-            .find(|l| l.id == layer_id)
+            .iter()
+            .position(|l| l.id == layer_id)
             .ok_or_else(|| ManasError::GrowthFailed(format!("layer {} not found", layer_id)))?;
 
+        let layer = &mut self.layers[layer_idx];
         layer
             .neurons
             .push(Neuron::new(id, input_size, layer.activation));
         self.total_neurons += 1;
+
+        // Expand weights of neurons in the next layer to accept the new connection
+        if layer_idx + 1 < self.layers.len() {
+            let next_layer = &mut self.layers[layer_idx + 1];
+            let mut rng = rand::thread_rng();
+            for neuron in &mut next_layer.neurons {
+                let w: f32 = rng.r#gen();
+                let z = (-2.0 * w.ln()).sqrt()
+                    * (2.0 * std::f32::consts::PI * rng.r#gen::<f32>()).cos();
+                neuron.weights.push(z * 0.1);
+            }
+        }
+
         Ok(id)
     }
 
