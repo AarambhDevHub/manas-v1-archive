@@ -94,6 +94,10 @@ enum Commands {
         max_tokens: usize,
         #[arg(long, default_value = "5")]
         max_context: usize,
+        #[arg(long, default_value = "1")]
+        top_k: usize,
+        #[arg(long, default_value = "1.0")]
+        temperature: f32,
     },
 }
 
@@ -143,7 +147,16 @@ fn main() {
             prompt,
             max_tokens,
             max_context,
-        } => cmd_generate(prompt, *max_tokens, *max_context, &brain_path),
+            top_k,
+            temperature,
+        } => cmd_generate(
+            prompt,
+            *max_tokens,
+            *max_context,
+            *top_k,
+            *temperature,
+            &brain_path,
+        ),
     };
 
     if let Err(e) = result {
@@ -916,11 +929,13 @@ fn cmd_predict_next(
     Ok(())
 }
 
-/// `manas generate "prompt" [--max-tokens 20] [--max-context 5]`
+/// `manas generate "prompt" [--max-tokens 20] [--max-context 5] [--top-k 1] [--temperature 1.0]`
 fn cmd_generate(
     prompt: &str,
     max_tokens: usize,
     max_context: usize,
+    top_k: usize,
+    temperature: f32,
     brain_path: &Path,
 ) -> Result<(), ManasError> {
     let brain = ManasBrain::new(brain_path);
@@ -954,9 +969,15 @@ fn cmd_generate(
         prompt,
         max_tokens,
         max_context,
+        top_k,
+        temperature,
     );
 
-    println!("{}", text);
+    if text.is_empty() {
+        println!("No output could be generated for the given prompt.");
+    } else {
+        println!("Generated:\n{}", text);
+    }
     Ok(())
 }
 

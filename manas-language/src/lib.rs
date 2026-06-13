@@ -475,6 +475,10 @@ pub fn train_next_token_examples(
 // ─── Text Generation ──────────────────────────────────────────────────────────
 
 /// Generate text using the hybrid memory + neural predictor.
+///
+/// * `top_k` — how many candidates the predictor considers (we always pick #1 for now)
+/// * `temperature` — reserved for future sampling; currently unused for deterministic top-1
+#[allow(clippy::too_many_arguments)]
 pub fn generate_text_with_memory(
     network: &Network,
     embedder: &Embedder,
@@ -483,12 +487,10 @@ pub fn generate_text_with_memory(
     prompt: &str,
     max_tokens: usize,
     max_context: usize,
+    top_k: usize,
+    _temperature: f32,
 ) -> String {
     let predictor = NextTokenPredictor::new(max_context);
-    let prompt_len = {
-        let mut t = tokenizer.clone();
-        t.encode(prompt).len()
-    };
     let mut tokens = {
         let mut t = tokenizer.clone();
         t.encode(prompt)
@@ -498,20 +500,60 @@ pub fn generate_text_with_memory(
         return String::new();
     }
 
+    let prompt_len = tokens.len();
+    let mut consecutive_repeats: u32 = 0;
+    let mut last_id: Option<u32> = None;
+
     for _ in 0..max_tokens {
-        let next = predictor.predict_top_k_with_memory(network, embedder, seq_memory, &tokens, 1);
-        match next.first() {
-            Some((id, _)) => tokens.push(*id),
+        // Stop if current context has no sequence memory match and we've
+        // already generated several tokens — means we've passed the training
+        // data and would be guessing randomly.
+        let gen_count = tokens.len() - prompt_len;
+        if gen_count > 2 && seq_memory.lookup_suffix(&tokens).is_empty() {
+            break;
+        }
+
+        let next =
+            predictor.predict_top_k_with_memory(network, embedder, seq_memory, &tokens, top_k);
+        let (id, _score) = match next.first() {
+            Some((id, score)) => (*id, *score),
             None => break,
+        };
+
+        // Stop if same token appears 3+ times in a row
+        if Some(id) == last_id {
+            consecutive_repeats += 1;
+        } else {
+            consecutive_repeats = 0;
+        }
+        if consecutive_repeats >= 2 {
+            break;
+        }
+        last_id = Some(id);
+
+        tokens.push(id);
+
+        // Cycle detection: check if the last 2k generated tokens repeat
+        let generated = &tokens[prompt_len..];
+        let gen_len = generated.len();
+        for window in 2..=8 {
+            if gen_len >= window * 2 {
+                let first = &generated[gen_len - window * 2..gen_len - window];
+                let second = &generated[gen_len - window..];
+                if first == second {
+                    return decode_tokens(tokenizer, &tokens);
+                }
+            }
         }
     }
 
-    let generated: Vec<&str> = tokens[prompt_len..]
-        .iter()
-        .filter_map(|id| tokenizer.decode(*id))
-        .collect();
+    decode_tokens(tokenizer, &tokens)
+}
 
-    generated.join(" ")
+/// Decode token ids to a space-joined string, skipping unknown tokens.
+fn decode_tokens(tokenizer: &Tokenizer, ids: &[u32]) -> String {
+    let words: Vec<&str> = ids.iter().filter_map(|id| tokenizer.decode(*id)).collect();
+    words.join(" ")
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -812,5 +854,132 @@ mod tests {
             "expected 'systems' as top 1 from suffix backoff, got '{}'",
             word
         );
+    }
+
+    // ── Generation tests (v0.3) ──────────────────────────────────────
+
+    /// Test A: train one sentence, generate "Rust is a" → output contains
+    /// "systems programming language"
+    #[test]
+    fn generate_single_sentence_contains_expected() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            "Rust is a systems programming language",
+            5,
+            20,
+            0.05,
+        )
+        .unwrap();
+
+        let output = generate_text_with_memory(
+            &network,
+            &trainer.embedder,
+            &trainer.tokenizer,
+            &seq_memory,
+            "Rust is a",
+            10,
+            5,
+            1,
+            1.0,
+        );
+
+        assert!(!output.is_empty(), "generated output should not be empty");
+        assert!(
+            output.contains("rust is a systems programming language"),
+            "expected 'rust is a systems programming language' in generated output, got: '{}'",
+            output
+        );
+    }
+
+    /// Test B: train two sentences, generate "Ownership is" → output contains
+    /// "ownership is rust's most unique feature"
+    #[test]
+    fn generate_two_sentences_contains_expected() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            "Rust is a systems programming language focused on safety and performance",
+            5,
+            20,
+            0.05,
+        )
+        .unwrap();
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            "Ownership is Rust's most unique feature and has deep implications",
+            5,
+            20,
+            0.05,
+        )
+        .unwrap();
+
+        let output = generate_text_with_memory(
+            &network,
+            &trainer.embedder,
+            &trainer.tokenizer,
+            &seq_memory,
+            "Ownership is",
+            10,
+            5,
+            1,
+            1.0,
+        );
+
+        assert!(!output.is_empty(), "generated output should not be empty");
+        assert!(
+            output.contains("ownership is rust's most unique feature"),
+            "expected 'ownership is rust's most unique feature' in generated output, got: '{}'",
+            output
+        );
+    }
+
+    /// Test C: generation should not panic on an unknown/novel prompt.
+    /// Should produce best-effort output or empty string, never panic.
+    #[test]
+    fn generate_unknown_prompt_no_panic() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        // Train on something first so the network has structure
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            "Rust is a systems programming language",
+            5,
+            5,
+            0.05,
+        )
+        .unwrap();
+
+        let output = generate_text_with_memory(
+            &network,
+            &trainer.embedder,
+            &trainer.tokenizer,
+            &seq_memory,
+            "Unknown topic",
+            10,
+            5,
+            1,
+            1.0,
+        );
+
+        // Should not panic; empty or best-effort is acceptable
+        let _ = output;
     }
 }

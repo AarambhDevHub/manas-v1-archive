@@ -253,6 +253,8 @@ manas predict-next "context"             Predict next token(s)
 manas generate "prompt"                  Generate text autoregressively
   --max-tokens 20                        Tokens to generate
   --max-context 5                        Context window
+  --top-k 1                              Candidates considered (top-1 is deterministic)
+  --temperature 1.0                      Sampling temperature (reserved)
 
 # Querying
 manas query "question"                    Search web + learn + display results

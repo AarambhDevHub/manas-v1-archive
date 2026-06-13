@@ -845,8 +845,11 @@ predict-next:
 generate:
   Load brain + SequenceMemory
     → Tokenize prompt → Loop:
+      → Stop if context has no memory match (past training data)
       → Hybrid prediction → append best token
-    → Decode tokens → Output text
+      → Stop on 3+ consecutive repeats
+      → Stop on cycle detection (pattern of 2-8 tokens repeats)
+    → Decode tokens → Print "Generated:\n<text>"
 ```
 
 #### CLI Commands
@@ -854,7 +857,7 @@ generate:
 ```bash
 manas train-language "text"  --epochs 50  --learning-rate 0.05  --max-context 5
 manas predict-next "prompt"  --top-k 5    --max-context 5
-manas generate "prompt"      --max-tokens 20  --max-context 5
+manas generate "prompt"      --max-tokens 20  --max-context 5  --top-k 1  --temperature 1.0
 ```
 
 #### Source Metadata
