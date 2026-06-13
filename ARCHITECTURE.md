@@ -250,7 +250,8 @@ manas/
 ├── manas-language/         ← next-token prediction, seq memory, hybrid predictor
 │   ├── Cargo.toml
 │   └── src/
-│       └── lib.rs
+│       ├── lib.rs
+│       └── attention.rs    ← single-head causal self-attention (v0.4)
 │
 ├── manas-ingest/               ← unified input pipeline (text, files, folders)
 │   ├── Cargo.toml
@@ -864,6 +865,24 @@ manas generate "prompt"      --max-tokens 20  --max-context 5  --top-k 1  --temp
 
 Language-trained neurons are stamped with `Source::RawText` and a detected freshness category. The `tag_neurons()` method (public on `Trainer`) stamps only neurons with `Source::Unknown`, preserving provenance from previous `learn`/`ingest` calls.
 
+#### Single-Head Causal Attention (v0.4)
+
+`CausalSelfAttention` is a standalone module in `attention.rs` with QKV projections, scaled dot-product scores, causal masking, and an output projection. It is implemented as custom Rust with no external dependencies. Not yet integrated into the default prediction path.
+
+```rust
+pub struct CausalSelfAttention {
+    pub embed_dim: usize,
+    pub w_q: Vec<f32>,   // embed_dim × embed_dim
+    pub w_k: Vec<f32>,   // embed_dim × embed_dim
+    pub w_v: Vec<f32>,   // embed_dim × embed_dim
+    pub w_o: Vec<f32>,   // embed_dim × embed_dim
+}
+```
+
+Weights are initialized with small random values (`N(0, 0.02)` scaled by `1/sqrt(d)`). The forward pass computes Q, K, V for each input token, applies causal masking (position `i` only attends to `0..=i`), scaled dot-product attention, softmax, weighted sum of V, and output projection.
+
+Helpers: `mat_vec_mul`, `dot`, `softmax` (numerically stable, subtracts max before exp).
+
 ---
 
 ## 7. The `.manas` Binary Format
@@ -1368,6 +1387,8 @@ No panics in library code. The CLI converts errors to user-friendly messages.
 | M9 | Full integration, end-to-end testing | all | Complete working system |
 | M10 | Performance optimization, benchmarks | all | Performance-tuned prototype |
 | M11 | **Next-token prediction (v0.2)** — sequence memory, hybrid predictor, source metadata | `manas-language` | Local next-token prediction |
+| M12 | **Real text generation (v0.3)** — loop prevention, memory-boundary stop, cycle detection | `manas-language` | Stable autoregressive generation |
+| M13 | **Single-head causal attention (v0.4)** — QKV, scaled dot-product, causal mask | `manas-language` | Custom attention module |
 
 ---
 

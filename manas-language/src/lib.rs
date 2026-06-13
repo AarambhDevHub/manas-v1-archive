@@ -1,3 +1,5 @@
+pub mod attention;
+
 use manas_core::{ManasError, Network};
 use manas_learn::Embedder;
 use manas_learn::Tokenizer;

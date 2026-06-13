@@ -201,12 +201,14 @@ Auto-detected from keywords in the text. Stale neurons trigger automatic interne
 - **Freshness system** — categorizes knowledge (timeless/slow/fast/realtime) and flags stale neurons
 - **Web search & scrape** — queries DuckDuckGo, scrapes HTML, and ingests results
 - **Next-token prediction (v0.2)** — `train-language`, `predict-next`, `generate` commands with hybrid sequence memory + neural predictor
+- **Single-head causal attention (v0.4)** — custom `CausalSelfAttention` module with QKV projections, scaled dot-product, and causal masking; not yet integrated into generation by default
 
 ## Current Limitations
 
 - **Query output is not local-first yet** — currently relies on web search rather than answering from the local network alone
 - **Answer generation is basic** — there is no generative text output; decoded tokens show the closest embeddings
 - **Next-token prediction is experimental** — v0.2 works for short contexts but is not trained on large corpora; generation quality is limited
+- **Attention is experimental (v0.4)** — single-head causal attention is implemented but not yet the default predictor; full transformer block is pending
 - **File/chunk learning is experimental** — chunking heuristics and per-chunk learning are still being refined
 - **One neuron per source is an anchor** — the source neuron acts as a pointer, not a full document understanding
 - **Not production-ready** — this is a research prototype; APIs, storage, and behavior may change
