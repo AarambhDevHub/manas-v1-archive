@@ -34,6 +34,10 @@ manas train-language "Rust is a systems programming language" --epochs 50
 # Train next-token prediction with transformer output head (v0.7)
 manas train-language "Rust is a systems programming language" --epochs 50 --train-transformer
 
+# Train with growth control (v0.7.1) — cap new neurons, or disable growth entirely
+manas train-language "Rust is a systems programming language" --epochs 50 --max-new-neurons 5
+manas train-language "Duplicate text" --epochs 50 --no-grow
+
 # Predict the next word (default: hybrid memory + neural)
 manas predict-next "Rust is a" --top-k 5
 
@@ -214,6 +218,7 @@ Auto-detected from keywords in the text. Stale neurons trigger automatic interne
 - **Tiny transformer block (v0.5)** — `TinyTransformerBlock` combining causal attention + feed-forward with residual connections; experimental, not yet the default predictor
 - **Transformer-assisted prediction (v0.6)** — `--use-transformer` flag for `predict-next` and `generate`; hybrid scoring (75% memory+neural, 25% transformer); experimental, default path unchanged
 - **Transformer output-head training (v0.7)** — `--train-transformer` flag for `train-language`; cross-entropy training of output projection head; dynamic weighting (40% transformer when trained); block weights frozen
+- **Neural growth optimization (v0.7.1)** — `--max-new-neurons` / `--no-grow` flags; growth capped per call and restricted to first epoch only; duplicate-text detection via `LanguageMeta` sidecar (`brain.manas.langmeta`) prevents re-growth on repeated training
 
 ## Current Limitations
 
@@ -223,6 +228,7 @@ Auto-detected from keywords in the text. Stale neurons trigger automatic interne
 - **Attention is experimental (v0.4)** — single-head causal attention is implemented but not yet the default predictor
 - **Transformer block is experimental (v0.5)** — `TinyTransformerBlock` exists for forward inference only; no training yet
 - **Transformer-assisted prediction is experimental (v0.6/v0.7)** — `--use-transformer` uses the trained output head when available; output head is trained, transformer block itself is still frozen; default path unchanged
+- **Growth control is experimental (v0.7.1)** — `max_new_neurons` cap and first-epoch-only growth help control network explosion; duplicate-text detection via `LanguageMeta` sidecar prevents re-growth on repeated training but is not retroactive
 - **File/chunk learning is experimental** — chunking heuristics and per-chunk learning are still being refined
 - **One neuron per source is an anchor** — the source neuron acts as a pointer, not a full document understanding
 - **Not production-ready** — this is a research prototype; APIs, storage, and behavior may change
@@ -261,6 +267,8 @@ manas train-language "text"              Train next-token prediction
   --epochs 50                            Training epochs
   --learning-rate 0.05                   Learning rate
   --max-context 5                        Sliding context window size
+  --max-new-neurons 10                   Max new neurons to grow (v0.7.1)
+  --no-grow                              Disable all neuron growth (v0.7.1)
 
 manas predict-next "context"             Predict next token(s)
   --top-k 5                              Number of candidates

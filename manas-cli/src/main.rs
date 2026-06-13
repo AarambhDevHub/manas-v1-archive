@@ -3,10 +3,10 @@ use manas_agent::{AgentPipeline, FreshnessChecker};
 use manas_core::{ManasError, Network, Neuron, Source};
 use manas_ingest::{IngestPipeline, IngestSource};
 use manas_language::{
-    NextTokenPredictor, SequenceMemory, TransformerLanguageModel, TransformerPredictor,
-    build_sequence_examples, generate_text_with_memory, generate_text_with_transformer,
-    seq_memory_path, train_next_token_examples, train_transformer_output_head,
-    transformer_model_path,
+    LanguageMeta, NextTokenPredictor, SequenceMemory, TransformerLanguageModel,
+    TransformerPredictor, build_sequence_examples, generate_text_with_memory,
+    generate_text_with_transformer, language_meta_path, seq_memory_path, text_hash,
+    train_next_token_examples, train_transformer_output_head, transformer_model_path,
 };
 use manas_learn::{Trainer, TrainerSnapshot, decode, detect_freshness_category};
 use manas_store::ManasBrain;
@@ -84,6 +84,10 @@ enum Commands {
         learning_rate: f32,
         #[arg(long)]
         train_transformer: bool,
+        #[arg(long, default_value = "10")]
+        max_new_neurons: usize,
+        #[arg(long)]
+        no_grow: bool,
     },
     PredictNext {
         text: String,
@@ -146,12 +150,16 @@ fn main() {
             epochs,
             learning_rate,
             train_transformer,
+            max_new_neurons,
+            no_grow,
         } => cmd_train_language(
             text,
             *max_context,
             *epochs,
             *learning_rate,
             *train_transformer,
+            *max_new_neurons,
+            *no_grow,
             &brain_path,
         ),
         Commands::PredictNext {
@@ -849,13 +857,16 @@ fn cmd_tag(text: &str, freshness: &str, brain_path: &Path) -> Result<(), ManasEr
 
 // ─── Language commands ─────────────────────────────────────────────────────────
 
-/// `manas train-language "text" [--max-context 5] [--epochs 10] [--learning-rate 0.05] [--train-transformer]`
+/// `manas train-language "text" [--max-context 5] [--epochs 10] [--learning-rate 0.05] [--train-transformer] [--max-new-neurons 10] [--no-grow]`
+#[allow(clippy::too_many_arguments)]
 fn cmd_train_language(
     text: &str,
     max_context: usize,
     epochs: usize,
     learning_rate: f32,
     train_transformer: bool,
+    max_new_neurons: usize,
+    no_grow: bool,
     brain_path: &Path,
 ) -> Result<(), ManasError> {
     let brain = ManasBrain::new(brain_path);
@@ -865,6 +876,27 @@ fn cmd_train_language(
 
     trainer.source = Source::RawText;
     trainer.freshness_category = detect_freshness_category(text);
+
+    // ── Language metadata for growth control ──────────────────────
+    let langmeta_path = language_meta_path(brain_path);
+    let mut langmeta = if langmeta_path.exists() {
+        LanguageMeta::load_from_file(&langmeta_path)?
+    } else {
+        LanguageMeta::new()
+    };
+
+    let hash = text_hash(text);
+    let is_known = langmeta.is_known(hash);
+
+    // Determine effective max_new_neurons:
+    //   --no-grow          ⇒ 0
+    //   known text         ⇒ 0 (disable growth for repeats)
+    //   otherwise          ⇒ max_new_neurons from CLI
+    let effective_max = if no_grow || is_known {
+        0
+    } else {
+        max_new_neurons
+    };
 
     // Load existing sequence memory or create fresh
     let seq_path = seq_memory_path(brain_path);
@@ -882,7 +914,13 @@ fn cmd_train_language(
         max_context,
         epochs,
         learning_rate,
+        effective_max,
     )?;
+
+    // Update language metadata
+    langmeta.record(hash, max_context, report.examples_count);
+    langmeta.save_to_file(&langmeta_path)?;
+
     network.total_texts_learned += 1;
     save_brain(&brain, &network, &trainer)?;
 

@@ -126,14 +126,14 @@ Input Sources
     │   pass)      │   └──────────────────┘   │  hybrid pred.)   │
     └──────┬───────┘                           └────────┬─────────┘
            │                                            │
-           └────────────────┬───────────────────────────┘
-                            ▼
-                  ┌────────────────┐
-                  │  manas-store   │  ← custom .manas binary + .manas.seq sidecar
-                  │  (.manas file, │     append-only growth
-                  │   read/write,  │     full neuron metadata
-                  │   append)      │
-                  └────────────────┘
+            └────────────────┬───────────────────────────┘
+                             ▼
+                   ┌────────────────┐
+                   │  manas-store   │  ← custom .manas binary + .manas.seq,
+                   │  (.manas file, │     .manas.transformer, .manas.langmeta
+                   │   read/write,  │     append-only growth
+                   │   append)      │     full neuron metadata
+                   └────────────────┘
 ```
 
 ---
@@ -192,9 +192,11 @@ Input Sources
 │                   │ • .manas file I/O  • header r/w      │             │
 │                   │ • neuron append    • full load/save  │             │
 │                   │ • integrity check  • .manas.seq I/O  │             │
+│                   │ • .manas.transformer I/O              │             │
+│                   │ • .manas.langmeta I/O                 │             │
 │                   └──────────────────────────────────────┘             │
 │                                      │                                 │
-│                         [brain.manas + brain.manas.seq]                │
+│         [brain.manas + brain.manas.seq + brain.manas.transformer + brain.manas.langmeta]                │
 │                    starts: ~1 KB                                       │
 │                    grows:  incrementally                               │
 └────────────────────────────────────────────────────────────────────────┘
@@ -832,11 +834,14 @@ The memory weight (0.8) dominates for seen transitions; the neural weight (0.2) 
 ```
 train-language:
   Input text → Tokenize → Build sequences (sliding window)
+    → Hash text for duplicate detection (v0.7.1)
+    → Load/update LanguageMeta sidecar
     → For each (context, target):
       → Embed context → Forward → Loss → Backprop
+      → Grow neuron only in first epoch and under max_new_neurons cap
       → Record in SequenceMemory (all suffix contexts)
       → Tag updated neurons with source + freshness
-    → Save brain + SequenceMemory sidecar
+    → Save brain + SequenceMemory sidecar + LanguageMeta sidecar
 
 predict-next:
   Load brain + SequenceMemory
@@ -857,7 +862,7 @@ generate:
 #### CLI Commands
 
 ```bash
-manas train-language "text"  --epochs 50  --learning-rate 0.05  --max-context 5
+manas train-language "text"  --epochs 50  --learning-rate 0.05  --max-context 5  --max-new-neurons 10  --no-grow
 manas predict-next "prompt"  --top-k 5    --max-context 5
 manas generate "prompt"      --max-tokens 20  --max-context 5  --top-k 1  --temperature 1.0
 ```
@@ -884,6 +889,8 @@ inputs
 **v0.6** — the block is experimentally connected to `predict-next --use-transformer` and `generate --use-transformer` via the `TransformerPredictor` in `lib.rs`. Scoring uses cosine-similarity against vocab embeddings. Default generation path (v0.3) unchanged.
 
 **v0.7** — a `TransformerLanguageModel` wraps the block with a trainable linear output head (`output_w`, `output_b`). The `--train-transformer` flag on `train-language` trains the output head via cross-entropy loss while keeping the block frozen. The trained model is persisted in a `brain.manas.transformer` sidecar file. When the output head is available, the transformer weight in the hybrid score increases from 0.25 to 0.40. The block itself is not serialized — it's deterministically rebuilt from `(embed_dim, hidden_dim)` on load.
+
+**v0.7.1** — neural growth optimization for `train-language`. Growth is now capped by `max_new_neurons` (default 10) and only attempted during the **first epoch** of training, preventing repeated per-epoch explosion. A `LanguageMeta` struct persisted as `brain.manas.langmeta` tracks text hashes for **duplicate-text detection** — repeated training of the same text automatically sets the growth cap to 0. CLI flags `--max-new-neurons <N>` and `--no-grow` give the user direct control. The `LanguageTrainReport` now reports `neurons_grown`.
 
 #### Single-Head Causal Attention (v0.4)
 
@@ -1033,6 +1040,24 @@ Key properties:
 - **Per-source identity**: each file/URL gets a dedicated neuron that carries
   its origin as metadata, visible via `manas neurons --all`
 - **Lightweight**: grows only 1 neuron even for large files (not 1 per chunk)
+
+### Growth Control in Language Training (v0.7.1)
+
+`train-language` growth is now controlled by `max_new_neurons`:
+
+```
+Each training call:
+  1. Hash the input text → check LanguageMeta sidecar for known duplicates
+  2. If known or --no-grow → max_new_neurons = 0 (no growth)
+  3. For epoch in 0..epochs:
+     allow_growth = (epoch == 0) && (neurons_grown < max_new_neurons)
+     Only grow neurons when allow_growth is true
+  4. After training: record text hash in LanguageMeta sidecar
+```
+
+This prevents neuron explosion when the same text is trained repeatedly
+(e.g. training the same sentence twice would previously grow ~400+ neurons
+over 100 epochs; now the second call detects the duplicate and grows 0).
 
 ### Layer Growth
 
@@ -1412,6 +1437,7 @@ No panics in library code. The CLI converts errors to user-friendly messages.
 | M14 | **Tiny transformer block (v0.5)** — causal attention + FFN + residual | `manas-language` | Forward-only transformer block |
 | M15 | **Transformer-assisted prediction (v0.6)** — `--use-transformer` flag, hybrid scoring, default path unchanged | `manas-language`, `manas-cli` | Experimental transformer integration |
 | M16 | **Transformer output-head training (v0.7)** — `--train-transformer` flag, cross-entropy, output head only, dynamic weight (0.40 trained / 0.25 untrained) | `manas-language`, `manas-cli` | Transformer learns next-token prediction |
+| M17 | **Neural growth optimization (v0.7.1)** — `max_new_neurons` cap, first-epoch-only growth, `LanguageMeta` sidecar for duplicate-text detection, `--max-new-neurons`/`--no-grow` CLI flags | `manas-language`, `manas-cli` | Controlled network growth |
 
 ---
 
@@ -1439,6 +1465,13 @@ manas ingest --folder ./docs/ --dry-run
 
 # Train next-token prediction
 manas train-language "Rust is a systems programming language" --epochs 50
+
+# Train next-token prediction with transformer output head (v0.7)
+manas train-language "Rust is a systems programming language" --epochs 50 --train-transformer
+
+# Train next-token prediction with growth control (v0.7.1)
+manas train-language "Rust is a systems programming language" --epochs 50 --max-new-neurons 5
+manas train-language "Duplicate text" --epochs 50 --no-grow
 
 # Predict the next word (hybrid memory + neural)
 manas predict-next "Rust is a" --top-k 5
