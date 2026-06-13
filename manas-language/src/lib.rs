@@ -318,37 +318,267 @@ impl NextTokenPredictor {
     }
 }
 
-// ─── Transformer-Assisted Prediction (v0.6) ────────────────────────────────
+// ─── Transformer Language Model (v0.7) ────────────────────────────────────
 
+use crate::attention::{SimpleRng, random_vec, softmax};
 use crate::transformer::TinyTransformerBlock;
 
-/// Weight given to the (untrained) transformer score in the experimental
-/// hybrid combination. The existing memory+neural score gets `1.0 - WEIGHT`.
-pub const TRANSFORMER_SCORE_WEIGHT: f32 = 0.25;
+// Magic constants for the transformer model sidecar file.
+const TRANSFORMER_FILE_MAGIC: u32 = 0x5452464C; // "TRFL"
+const TRANSFORMER_FILE_VERSION: u32 = 1;
+
+/// Weight given to the transformer score when the output head is **untrained**
+/// (cosine-similarity fallback).
+const TRANSFORMER_SCORE_WEIGHT_UNTRAINED: f32 = 0.25;
+
+/// Weight given to the transformer score when the output head **has been
+/// trained** via `train_transformer_output_head`.
+const TRANSFORMER_SCORE_WEIGHT_TRAINED: f32 = 0.40;
+
+/// The full transformer language model: a `TinyTransformerBlock` (frozen for
+/// v0.7) plus a trainable linear output head (`output_w`, `output_b`) that
+/// projects the last token's hidden state to vocabulary logits.
+///
+/// `vocab_order` maps output-head position → token ID and is captured
+/// deterministically (sorted) at creation time.  Both training and inference
+/// use this mapping so indices are always correct.
+///
+/// Weights are deterministic (seeded Box-Muller).  The block is **not**
+/// serialised by default — on load it is rebuilt from `(embed_dim, hidden_dim)`
+/// using the same seeds, which is correct while block weights are frozen.
+pub struct TransformerLanguageModel {
+    pub block: TinyTransformerBlock,
+    pub output_w: Vec<f32>,
+    pub output_b: Vec<f32>,
+    pub embed_dim: usize,
+    pub hidden_dim: usize,
+    pub vocab_order: Vec<u32>,
+}
+
+impl TransformerLanguageModel {
+    /// Create a fresh model with a deterministic block and a small-random
+    /// output head (`output_w` initialised with `N(0, 0.01)`).
+    ///
+    /// `vocab_order` should be a sorted list of all token IDs that the
+    /// output head will cover (typically `embedder.table.keys()` sorted).
+    pub fn new(embed_dim: usize, hidden_dim: usize, vocab_order: Vec<u32>) -> Self {
+        let vocab_size = vocab_order.len();
+        let mut rng = SimpleRng::new(44);
+        let scale = 0.01f32;
+        TransformerLanguageModel {
+            block: TinyTransformerBlock::new(embed_dim, hidden_dim),
+            output_w: random_vec(&mut rng, embed_dim * vocab_size, scale),
+            output_b: vec![0.0; vocab_size],
+            embed_dim,
+            hidden_dim,
+            vocab_order,
+        }
+    }
+
+    /// Number of vocabulary entries in the output head.
+    pub fn vocab_size(&self) -> usize {
+        self.vocab_order.len()
+    }
+
+    /// Run the transformer block on a sequence of token embeddings.
+    /// Returns the per-token output vectors (one per input token).
+    pub fn block_forward(&self, seq: &[Vec<f32>]) -> Option<Vec<Vec<f32>>> {
+        if seq.is_empty() {
+            return None;
+        }
+        Some(self.block.forward(seq))
+    }
+
+    /// Project the last-hidden vector to vocabulary logits:
+    /// `logits[v] = output_w[v] · last + output_b[v]`
+    pub fn logits_from_last(&self, last: &[f32]) -> Vec<f32> {
+        let embed_dim = self.embed_dim;
+        let vsize = self.vocab_size();
+        let mut logits = vec![0.0; vsize];
+        for (v, logit) in logits.iter_mut().enumerate() {
+            let mut sum = self.output_b[v];
+            for (i, &val) in last.iter().enumerate().take(embed_dim) {
+                sum += self.output_w[v * embed_dim + i] * val;
+            }
+            *logit = sum;
+        }
+        logits
+    }
+
+    // ── Persistence ────────────────────────────────────────────────────
+
+    /// Save the model to a sidecar binary file.
+    pub fn save_to_file(&self, path: &Path) -> Result<(), ManasError> {
+        let mut buf = Vec::new();
+        let vsize = self.vocab_size() as u32;
+
+        buf.extend_from_slice(&TRANSFORMER_FILE_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&TRANSFORMER_FILE_VERSION.to_le_bytes());
+        buf.extend_from_slice(&(self.embed_dim as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.hidden_dim as u32).to_le_bytes());
+        buf.extend_from_slice(&vsize.to_le_bytes());
+
+        let ow_len = self.output_w.len() as u32;
+        buf.extend_from_slice(&ow_len.to_le_bytes());
+        for &v in &self.output_w {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let ob_len = self.output_b.len() as u32;
+        buf.extend_from_slice(&ob_len.to_le_bytes());
+        for &v in &self.output_b {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let vo_len = self.vocab_order.len() as u32;
+        buf.extend_from_slice(&vo_len.to_le_bytes());
+        for &id in &self.vocab_order {
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+
+        std::fs::write(path, &buf).map_err(|e| ManasError::FileReadError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        Ok(())
+    }
+
+    /// Load a model from a sidecar binary file.
+    ///
+    /// The transformer block is **rebuilt** from `(embed_dim, hidden_dim)`
+    /// using the same deterministic seeds, so block weights match those used
+    /// during training (correct while block is frozen).
+    pub fn load_from_file(path: &Path) -> Result<Self, ManasError> {
+        let buf = std::fs::read(path).map_err(|e| ManasError::FileReadError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let mut cursor = &buf[..];
+
+        let read_u32 = |c: &mut &[u8]| -> u32 {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&c[..4]);
+            *c = &c[4..];
+            u32::from_le_bytes(bytes)
+        };
+
+        let magic = read_u32(&mut cursor);
+        if magic != TRANSFORMER_FILE_MAGIC {
+            return Err(ManasError::GrowthFailed(format!(
+                "bad transformer file magic: {:#x}",
+                magic
+            )));
+        }
+        let _version = read_u32(&mut cursor);
+        let embed_dim = read_u32(&mut cursor) as usize;
+        let hidden_dim = read_u32(&mut cursor) as usize;
+        let _vocab_size = read_u32(&mut cursor);
+
+        let block = TinyTransformerBlock::new(embed_dim, hidden_dim);
+
+        let ow_len = read_u32(&mut cursor) as usize;
+        let mut output_w = vec![0.0; ow_len];
+        for v in &mut output_w {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&cursor[..4]);
+            cursor = &cursor[4..];
+            *v = f32::from_le_bytes(bytes);
+        }
+
+        let ob_len = read_u32(&mut cursor) as usize;
+        let mut output_b = vec![0.0; ob_len];
+        for v in &mut output_b {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&cursor[..4]);
+            cursor = &cursor[4..];
+            *v = f32::from_le_bytes(bytes);
+        }
+
+        let vo_len = read_u32(&mut cursor) as usize;
+        let mut vocab_order = vec![0u32; vo_len];
+        for id in &mut vocab_order {
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&cursor[..4]);
+            cursor = &cursor[4..];
+            *id = u32::from_le_bytes(bytes);
+        }
+
+        Ok(TransformerLanguageModel {
+            block,
+            output_w,
+            output_b,
+            embed_dim,
+            hidden_dim,
+            vocab_order,
+        })
+    }
+}
+
+// ─── Transformer-Assisted Prediction (v0.7) ───────────────────────────────
 
 /// Experimental predictor that combines the existing hybrid memory+neural
-/// scores with scores from the (untrained) `TinyTransformerBlock`.
+/// scores with scores from the `TinyTransformerBlock`.
 ///
-/// `final_score = (1 - TRANSFORMER_SCORE_WEIGHT) * hybrid_score
-///                 + TRANSFORMER_SCORE_WEIGHT * transformer_score`
+/// When a trained output head is available (via `from_model` or `set_output_*`),
+/// the transformer scores come from the output-head projection + softmax;
+/// otherwise a cosine-similarity fallback is used.
+///
+/// The transformer weight is **dynamic**:
+/// * 0.25 when the output head is empty (untrained cosine-similarity mode)
+/// * 0.40 when the output head has been trained
 pub struct TransformerPredictor {
     pub block: TinyTransformerBlock,
+    pub output_w: Vec<f32>,
+    pub output_b: Vec<f32>,
+    pub vocab_order: Vec<u32>,
     pub max_context: usize,
 }
 
 impl TransformerPredictor {
+    /// Create a predictor with an **empty** (untrained) output head.
+    /// Scoring will fall back to cosine-similarity against vocab embeddings.
     pub fn new(embed_dim: usize, hidden_dim: usize, max_context: usize) -> Self {
         TransformerPredictor {
             block: TinyTransformerBlock::new(embed_dim, hidden_dim),
+            output_w: Vec::new(),
+            output_b: Vec::new(),
+            vocab_order: Vec::new(),
             max_context,
         }
     }
 
-    /// Pure transformer scoring:
-    ///   1. get ordered token embeddings (last `max_context` tokens)
-    ///   2. pass through `TinyTransformerBlock::forward`
-    ///   3. take the last output vector
-    ///   4. cosine-similarity against every vocab embedding
+    /// Create a predictor from a trained `TransformerLanguageModel`.
+    ///
+    /// The block is **rebuilt** from the model's dimensions using the same
+    /// deterministic seeds (correct while block weights are frozen).
+    pub fn from_model(model: &TransformerLanguageModel, max_context: usize) -> Self {
+        TransformerPredictor {
+            block: TinyTransformerBlock::new(model.embed_dim, model.hidden_dim),
+            output_w: model.output_w.clone(),
+            output_b: model.output_b.clone(),
+            vocab_order: model.vocab_order.clone(),
+            max_context,
+        }
+    }
+
+    /// Returns `true` when a trained output head is available.
+    pub fn has_trained_output_head(&self) -> bool {
+        !self.output_w.is_empty()
+    }
+
+    /// The weight to apply to the transformer score (0.25 untrained / 0.40 trained).
+    pub fn transformer_weight(&self) -> f32 {
+        if self.has_trained_output_head() {
+            TRANSFORMER_SCORE_WEIGHT_TRAINED
+        } else {
+            TRANSFORMER_SCORE_WEIGHT_UNTRAINED
+        }
+    }
+
+    /// Pure transformer scoring (used internally by `predict_top_k_assisted`).
+    ///
+    /// When the output head is trained:  output-head projection → softmax.
+    /// Otherwise:                        cosine-similarity against vocab embeddings.
     fn predict_top_k_transformer(
         &self,
         embedder: &Embedder,
@@ -378,25 +608,54 @@ impl TransformerPredictor {
         };
 
         // Score all vocab tokens
-        let mut scored: Vec<(u32, f32)> = embedder
-            .table
-            .iter()
-            .map(|(&tid, emb)| {
-                let score = cosine_similarity(last_output, emb);
-                (tid, score)
-            })
-            .collect();
+        let mut scored: Vec<(u32, f32)> = if self.has_trained_output_head() {
+            // Trained path: output-head projection → softmax, map via vocab_order
+            let logits = self.project_logits(last_output);
+            let probs = softmax(&logits);
+            self.vocab_order
+                .iter()
+                .enumerate()
+                .map(|(idx, &tid)| (tid, probs[idx]))
+                .collect()
+        } else {
+            // Untrained fallback: cosine similarity
+            embedder
+                .table
+                .iter()
+                .map(|(&tid, emb)| {
+                    let score = cosine_similarity(last_output, emb);
+                    (tid, score)
+                })
+                .collect()
+        };
 
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         scored
     }
 
+    /// Project the last hidden vector to vocabulary logits via the output head.
+    /// Assumes `has_trained_output_head()` is true.
+    fn project_logits(&self, last: &[f32]) -> Vec<f32> {
+        let embed_dim = self.block.embed_dim;
+        let vsize = self.vocab_order.len();
+        let mut logits = vec![0.0; vsize];
+        for (v, logit) in logits.iter_mut().enumerate() {
+            let mut sum = self.output_b[v];
+            for (i, &val) in last.iter().enumerate().take(embed_dim) {
+                sum += self.output_w[v * embed_dim + i] * val;
+            }
+            *logit = sum;
+        }
+        logits
+    }
+
     /// Experimental hybrid scoring that mixes the proven memory+neural
-    /// scores with the untrained transformer scores.
+    /// scores with the transformer scores.
     ///
-    /// The transformer weight is controlled by `TRANSFORMER_SCORE_WEIGHT`
-    /// (currently 0.25).
+    /// The transformer weight is **dynamic**:
+    /// * 0.25 when the output head is untrained (cosine-similarity)
+    /// * 0.40 when the output head has been trained
     pub fn predict_top_k_assisted(
         &self,
         network: &Network,
@@ -435,13 +694,13 @@ impl TransformerPredictor {
             return Vec::new();
         }
 
+        let tw = self.transformer_weight();
         let mut scored: Vec<(u32, f32)> = all_ids
             .drain()
             .map(|tid| {
                 let hybrid = hybrid_map.get(&tid).copied().unwrap_or(0.0);
                 let transformer = transformer_map.get(&tid).copied().unwrap_or(0.0);
-                let final_score = (1.0 - TRANSFORMER_SCORE_WEIGHT) * hybrid
-                    + TRANSFORMER_SCORE_WEIGHT * transformer;
+                let final_score = (1.0 - tw) * hybrid + tw * transformer;
                 (tid, final_score)
             })
             .collect();
@@ -676,6 +935,97 @@ pub fn train_next_token_examples(
     })
 }
 
+// ─── Transformer Output-Head Training (v0.7) ─────────────────────────────────
+
+/// Train only the **output head** (`output_w`, `output_b`) of a
+/// `TransformerLanguageModel` using cross-entropy loss.
+///
+/// The transformer block weights remain **frozen** (deterministic from seed).
+/// This is the v0.7 approach — it lets the model learn to map the last hidden
+/// state to the correct next-token probability without full backprop through
+/// the attention/FFN layers.
+///
+/// Returns the average cross-entropy loss over all examples × epochs.
+pub fn train_transformer_output_head(
+    model: &mut TransformerLanguageModel,
+    embedder: &Embedder,
+    examples: &[SequenceExample],
+    max_context: usize,
+    epochs: usize,
+    learning_rate: f32,
+) -> f32 {
+    if examples.is_empty() || model.vocab_size() == 0 {
+        return 0.0;
+    }
+
+    let embed_dim = model.embed_dim;
+    let mut total_loss = 0.0;
+    let mut count = 0usize;
+
+    for _epoch in 0..epochs {
+        for example in examples {
+            // Build ordered token embeddings for the context
+            let start = example.context.len().saturating_sub(max_context);
+            let seq: Vec<Vec<f32>> = example.context[start..]
+                .iter()
+                .filter_map(|id| embedder.embed(*id).map(<[f32]>::to_vec))
+                .collect();
+            if seq.is_empty() {
+                continue;
+            }
+
+            // Forward through transformer block (frozen)
+            let block_out = match model.block_forward(&seq) {
+                Some(o) => o,
+                None => continue,
+            };
+            let last = match block_out.last() {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+
+            // Output head projection → logits → softmax
+            let logits = model.logits_from_last(&last);
+            let probs = softmax(&logits);
+
+            // Find output-head position for the target token via vocab_order
+            let target_pos = match model
+                .vocab_order
+                .iter()
+                .position(|&id| id == example.target)
+            {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Cross-entropy loss
+            let p = probs[target_pos].max(1e-10);
+            total_loss += -p.ln();
+            count += 1;
+
+            // Gradient for output_w / output_b
+            //   dL/d(logit_v) = probs[v] - (v == target_pos)
+            for (v, &prob) in probs.iter().enumerate() {
+                let grad = prob - if v == target_pos { 1.0 } else { 0.0 };
+                if grad.abs() < 1e-10 {
+                    continue;
+                }
+                for (i, &val) in last.iter().enumerate().take(embed_dim) {
+                    let idx = v * embed_dim + i;
+                    model.output_w[idx] -= learning_rate * grad * val;
+                }
+                model.output_b[v] -= learning_rate * grad;
+            }
+        }
+    }
+
+    if count > 0 {
+        total_loss / count as f32
+    } else {
+        0.0
+    }
+}
+
 // ─── Text Generation ──────────────────────────────────────────────────────────
 
 /// Generate text using the hybrid memory + neural predictor.
@@ -812,6 +1162,18 @@ pub fn seq_memory_path(brain_path: &Path) -> std::path::PathBuf {
         .extension()
         .map(|e| format!("{}.seq", e.to_string_lossy()))
         .unwrap_or_else(|| "seq".to_string());
+    p.set_extension(ext);
+    p
+}
+
+/// Derive the transformer model file path from a brain path.
+/// e.g. `./brain.manas` → `./brain.manas.transformer`
+pub fn transformer_model_path(brain_path: &Path) -> std::path::PathBuf {
+    let mut p = brain_path.to_path_buf();
+    let ext = p
+        .extension()
+        .map(|e| format!("{}.transformer", e.to_string_lossy()))
+        .unwrap_or_else(|| "transformer".to_string());
     p.set_extension(ext);
     p
 }
@@ -1322,5 +1684,269 @@ mod tests {
 
         // Should not panic; empty or best-effort is acceptable
         let _ = output;
+    }
+
+    // ── v0.7 Transformer output-head training tests ────────────────────
+
+    /// Test B: train output head, then predict "Rust is a" → "systems"
+    /// in top 1 or top 3 with `--use-transformer`.
+    #[test]
+    fn transformer_training_predicts_systems() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            "Rust is a systems programming language",
+            5,
+            15,
+            0.05,
+        )
+        .unwrap();
+
+        let embed_dim = trainer.embedder.dim;
+        let hidden_dim = (embed_dim * 2).max(8);
+        let mut vocab_order: Vec<u32> = trainer.embedder.table.keys().copied().collect();
+        vocab_order.sort();
+
+        let examples = build_sequence_examples(
+            &trainer
+                .tokenizer
+                .encode("Rust is a systems programming language"),
+            5,
+        );
+        let mut model = TransformerLanguageModel::new(embed_dim, hidden_dim, vocab_order);
+        let _loss =
+            train_transformer_output_head(&mut model, &trainer.embedder, &examples, 5, 30, 0.01);
+
+        let predictor = TransformerPredictor::from_model(&model, 5);
+        let tokens = {
+            let mut t = trainer.tokenizer.clone();
+            t.encode("Rust is a")
+        };
+        let results =
+            predictor.predict_top_k_assisted(&network, &trainer.embedder, &seq_memory, &tokens, 3);
+
+        assert!(
+            !results.is_empty(),
+            "should have predictions after training"
+        );
+        let words: Vec<String> = results
+            .iter()
+            .filter_map(|(id, _)| trainer.tokenizer.decode(*id).map(|s| s.to_string()))
+            .collect();
+        assert!(
+            words.contains(&"systems".to_string()),
+            "expected 'systems' in top 3, got: {:?}",
+            words
+        );
+    }
+
+    /// Test C: train two sentences, then verify expected tokens appear
+    /// in top 1-3 for each prompt.
+    #[test]
+    fn transformer_training_two_sentences() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        let text1 = "Rust is a systems programming language focused on safety and performance";
+        let text2 = "Ownership is Rust's most unique feature and has deep implications";
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            text1,
+            5,
+            20,
+            0.05,
+        )
+        .unwrap();
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            text2,
+            5,
+            20,
+            0.05,
+        )
+        .unwrap();
+
+        let embed_dim = trainer.embedder.dim;
+        let hidden_dim = (embed_dim * 2).max(8);
+        let mut vocab_order: Vec<u32> = trainer.embedder.table.keys().copied().collect();
+        vocab_order.sort();
+
+        let combined = format!("{} {}", text1, text2);
+        let all_tokens = trainer.tokenizer.encode(&combined);
+        let examples = build_sequence_examples(&all_tokens, 5);
+
+        let mut model = TransformerLanguageModel::new(embed_dim, hidden_dim, vocab_order);
+        train_transformer_output_head(&mut model, &trainer.embedder, &examples, 5, 30, 0.01);
+
+        let predictor = TransformerPredictor::from_model(&model, 5);
+
+        // "Rust is a" → "systems"
+        let tokens_a = {
+            let mut t = trainer.tokenizer.clone();
+            t.encode("Rust is a")
+        };
+        let results_a = predictor.predict_top_k_assisted(
+            &network,
+            &trainer.embedder,
+            &seq_memory,
+            &tokens_a,
+            3,
+        );
+        let words_a: Vec<String> = results_a
+            .iter()
+            .filter_map(|(id, _)| trainer.tokenizer.decode(*id).map(|s| s.to_string()))
+            .collect();
+        assert!(
+            words_a.contains(&"systems".to_string()),
+            "'systems' in top 3 for 'Rust is a', got: {:?}",
+            words_a
+        );
+
+        // "Ownership is" → "rust's"
+        let tokens_b = {
+            let mut t = trainer.tokenizer.clone();
+            t.encode("Ownership is")
+        };
+        let results_b = predictor.predict_top_k_assisted(
+            &network,
+            &trainer.embedder,
+            &seq_memory,
+            &tokens_b,
+            3,
+        );
+        let words_b: Vec<String> = results_b
+            .iter()
+            .filter_map(|(id, _)| trainer.tokenizer.decode(*id).map(|s| s.to_string()))
+            .collect();
+        assert!(
+            words_b.contains(&"rust's".to_string()),
+            "'rust's' in top 3 for 'Ownership is', got: {:?}",
+            words_b
+        );
+    }
+
+    /// Test D: persistence — save model to temp file, reload, verify
+    /// prediction still works.
+    #[test]
+    fn transformer_model_save_roundtrip() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            "Rust is a systems programming language",
+            5,
+            15,
+            0.05,
+        )
+        .unwrap();
+
+        let embed_dim = trainer.embedder.dim;
+        let hidden_dim = (embed_dim * 2).max(8);
+        let mut vocab_order: Vec<u32> = trainer.embedder.table.keys().copied().collect();
+        vocab_order.sort();
+
+        let examples = build_sequence_examples(
+            &trainer
+                .tokenizer
+                .encode("Rust is a systems programming language"),
+            5,
+        );
+        let mut model = TransformerLanguageModel::new(embed_dim, hidden_dim, vocab_order);
+        train_transformer_output_head(&mut model, &trainer.embedder, &examples, 5, 10, 0.01);
+
+        // Save to temp file
+        let path = std::env::temp_dir().join("transformer_test_roundtrip.bin");
+        model.save_to_file(&path).unwrap();
+
+        // Load back
+        let loaded = TransformerLanguageModel::load_from_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.embed_dim, model.embed_dim);
+        assert_eq!(loaded.hidden_dim, model.hidden_dim);
+        assert_eq!(loaded.vocab_order.len(), model.vocab_order.len());
+        assert_eq!(loaded.vocab_order, model.vocab_order);
+        assert_eq!(loaded.output_w.len(), model.output_w.len());
+        assert_eq!(loaded.output_b.len(), model.output_b.len());
+
+        // Output weights should be very close
+        for (a, b) in loaded.output_w.iter().zip(model.output_w.iter()) {
+            assert!((a - b).abs() < 1e-5, "output_w mismatch");
+        }
+        for (a, b) in loaded.output_b.iter().zip(model.output_b.iter()) {
+            assert!((a - b).abs() < 1e-5, "output_b mismatch");
+        }
+
+        // Prediction should still work with reloaded model
+        let predictor = TransformerPredictor::from_model(&loaded, 5);
+        let tokens = {
+            let mut t = trainer.tokenizer.clone();
+            t.encode("Rust is a")
+        };
+        let results =
+            predictor.predict_top_k_assisted(&network, &trainer.embedder, &seq_memory, &tokens, 3);
+        assert!(
+            !results.is_empty(),
+            "predictions after reload should not be empty"
+        );
+    }
+
+    /// Test E: unknown prompt with trained transformer should not panic.
+    #[test]
+    fn transformer_trained_unknown_prompt_no_panic() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            "Rust is a systems programming language",
+            5,
+            5,
+            0.05,
+        )
+        .unwrap();
+
+        let embed_dim = trainer.embedder.dim;
+        let hidden_dim = (embed_dim * 2).max(8);
+        let mut vocab_order: Vec<u32> = trainer.embedder.table.keys().copied().collect();
+        vocab_order.sort();
+
+        let examples = build_sequence_examples(
+            &trainer
+                .tokenizer
+                .encode("Rust is a systems programming language"),
+            5,
+        );
+        let mut model = TransformerLanguageModel::new(embed_dim, hidden_dim, vocab_order);
+        train_transformer_output_head(&mut model, &trainer.embedder, &examples, 5, 5, 0.01);
+
+        let predictor = TransformerPredictor::from_model(&model, 5);
+        let tokens = {
+            let mut t = trainer.tokenizer.clone();
+            t.encode("Unknown topic")
+        };
+        let results =
+            predictor.predict_top_k_assisted(&network, &trainer.embedder, &seq_memory, &tokens, 3);
+
+        // Should not panic; empty or non-empty is acceptable
+        let _ = results;
     }
 }

@@ -879,7 +879,11 @@ inputs
 → outputs
 ```
 
-`FeedForward` uses a single hidden layer: `w1 @ x + b1 → ReLU → w2 @ hidden + b2`. Weights initialized with the same deterministic random scheme as attention. As of v0.6, this block is experimentally connected to `predict-next --use-transformer` and `generate --use-transformer` via the `TransformerPredictor` in `lib.rs`. The default generation path (v0.3) is unchanged.
+`FeedForward` uses a single hidden layer: `w1 @ x + b1 → ReLU → w2 @ hidden + b2`. Weights initialized with the same deterministic random scheme as attention.
+
+**v0.6** — the block is experimentally connected to `predict-next --use-transformer` and `generate --use-transformer` via the `TransformerPredictor` in `lib.rs`. Scoring uses cosine-similarity against vocab embeddings. Default generation path (v0.3) unchanged.
+
+**v0.7** — a `TransformerLanguageModel` wraps the block with a trainable linear output head (`output_w`, `output_b`). The `--train-transformer` flag on `train-language` trains the output head via cross-entropy loss while keeping the block frozen. The trained model is persisted in a `brain.manas.transformer` sidecar file. When the output head is available, the transformer weight in the hybrid score increases from 0.25 to 0.40. The block itself is not serialized — it's deterministically rebuilt from `(embed_dim, hidden_dim)` on load.
 
 #### Single-Head Causal Attention (v0.4)
 
@@ -1407,6 +1411,7 @@ No panics in library code. The CLI converts errors to user-friendly messages.
 | M13 | **Single-head causal attention (v0.4)** — QKV, scaled dot-product, causal mask | `manas-language` | Custom attention module |
 | M14 | **Tiny transformer block (v0.5)** — causal attention + FFN + residual | `manas-language` | Forward-only transformer block |
 | M15 | **Transformer-assisted prediction (v0.6)** — `--use-transformer` flag, hybrid scoring, default path unchanged | `manas-language`, `manas-cli` | Experimental transformer integration |
+| M16 | **Transformer output-head training (v0.7)** — `--train-transformer` flag, cross-entropy, output head only, dynamic weight (0.40 trained / 0.25 untrained) | `manas-language`, `manas-cli` | Transformer learns next-token prediction |
 
 ---
 

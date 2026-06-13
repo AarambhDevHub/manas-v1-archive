@@ -31,6 +31,9 @@ manas learn "Rust is a systems programming language with zero-cost abstractions"
 # Train next-token prediction (v0.2)
 manas train-language "Rust is a systems programming language" --epochs 50
 
+# Train next-token prediction with transformer output head (v0.7)
+manas train-language "Rust is a systems programming language" --epochs 50 --train-transformer
+
 # Predict the next word (default: hybrid memory + neural)
 manas predict-next "Rust is a" --top-k 5
 
@@ -210,6 +213,7 @@ Auto-detected from keywords in the text. Stale neurons trigger automatic interne
 - **Single-head causal attention (v0.4)** — custom `CausalSelfAttention` module with QKV projections, scaled dot-product, and causal masking; not yet integrated into generation by default
 - **Tiny transformer block (v0.5)** — `TinyTransformerBlock` combining causal attention + feed-forward with residual connections; experimental, not yet the default predictor
 - **Transformer-assisted prediction (v0.6)** — `--use-transformer` flag for `predict-next` and `generate`; hybrid scoring (75% memory+neural, 25% transformer); experimental, default path unchanged
+- **Transformer output-head training (v0.7)** — `--train-transformer` flag for `train-language`; cross-entropy training of output projection head; dynamic weighting (40% transformer when trained); block weights frozen
 
 ## Current Limitations
 
@@ -218,7 +222,7 @@ Auto-detected from keywords in the text. Stale neurons trigger automatic interne
 - **Next-token prediction is experimental** — v0.2 works for short contexts but is not trained on large corpora; generation quality is limited
 - **Attention is experimental (v0.4)** — single-head causal attention is implemented but not yet the default predictor
 - **Transformer block is experimental (v0.5)** — `TinyTransformerBlock` exists for forward inference only; no training yet
-- **Transformer-assisted prediction is experimental (v0.6)** — `--use-transformer` uses untrained weights; output quality is limited; default path unchanged
+- **Transformer-assisted prediction is experimental (v0.6/v0.7)** — `--use-transformer` uses the trained output head when available; output head is trained, transformer block itself is still frozen; default path unchanged
 - **File/chunk learning is experimental** — chunking heuristics and per-chunk learning are still being refined
 - **One neuron per source is an anchor** — the source neuron acts as a pointer, not a full document understanding
 - **Not production-ready** — this is a research prototype; APIs, storage, and behavior may change

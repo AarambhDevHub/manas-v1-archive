@@ -3,8 +3,10 @@ use manas_agent::{AgentPipeline, FreshnessChecker};
 use manas_core::{ManasError, Network, Neuron, Source};
 use manas_ingest::{IngestPipeline, IngestSource};
 use manas_language::{
-    NextTokenPredictor, SequenceMemory, TransformerPredictor, generate_text_with_memory,
-    generate_text_with_transformer, seq_memory_path, train_next_token_examples,
+    NextTokenPredictor, SequenceMemory, TransformerLanguageModel, TransformerPredictor,
+    build_sequence_examples, generate_text_with_memory, generate_text_with_transformer,
+    seq_memory_path, train_next_token_examples, train_transformer_output_head,
+    transformer_model_path,
 };
 use manas_learn::{Trainer, TrainerSnapshot, decode, detect_freshness_category};
 use manas_store::ManasBrain;
@@ -80,6 +82,8 @@ enum Commands {
         epochs: usize,
         #[arg(long, default_value = "0.05")]
         learning_rate: f32,
+        #[arg(long)]
+        train_transformer: bool,
     },
     PredictNext {
         text: String,
@@ -141,7 +145,15 @@ fn main() {
             max_context,
             epochs,
             learning_rate,
-        } => cmd_train_language(text, *max_context, *epochs, *learning_rate, &brain_path),
+            train_transformer,
+        } => cmd_train_language(
+            text,
+            *max_context,
+            *epochs,
+            *learning_rate,
+            *train_transformer,
+            &brain_path,
+        ),
         Commands::PredictNext {
             text,
             max_context,
@@ -837,12 +849,13 @@ fn cmd_tag(text: &str, freshness: &str, brain_path: &Path) -> Result<(), ManasEr
 
 // ─── Language commands ─────────────────────────────────────────────────────────
 
-/// `manas train-language "text" [--max-context 5]`
+/// `manas train-language "text" [--max-context 5] [--epochs 10] [--learning-rate 0.05] [--train-transformer]`
 fn cmd_train_language(
     text: &str,
     max_context: usize,
     epochs: usize,
     learning_rate: f32,
+    train_transformer: bool,
     brain_path: &Path,
 ) -> Result<(), ManasError> {
     let brain = ManasBrain::new(brain_path);
@@ -875,6 +888,42 @@ fn cmd_train_language(
 
     // Save sequence memory alongside the brain
     seq_memory.save_to_file(&seq_path)?;
+
+    // ── Optional transformer output-head training (v0.7) ──────────
+    if train_transformer {
+        let embed_dim = trainer.embedder.dim;
+        let hidden_dim = (embed_dim * 2).max(8);
+
+        let transformer_path = transformer_model_path(brain_path);
+        let mut model = if transformer_path.exists() {
+            TransformerLanguageModel::load_from_file(&transformer_path)?
+        } else {
+            let mut vocab_order: Vec<u32> = trainer.embedder.table.keys().copied().collect();
+            vocab_order.sort();
+            TransformerLanguageModel::new(embed_dim, hidden_dim, vocab_order)
+        };
+
+        let tokens = trainer.tokenizer.encode(text);
+        let examples = build_sequence_examples(&tokens, max_context);
+
+        let transformer_lr = learning_rate * 0.2;
+        let tf_epochs = epochs.max(10);
+        let tf_loss = train_transformer_output_head(
+            &mut model,
+            &trainer.embedder,
+            &examples,
+            max_context,
+            tf_epochs,
+            transformer_lr,
+        );
+
+        model.save_to_file(&transformer_path)?;
+
+        println!(
+            "Trained transformer output head: {} epochs, avg loss: {:.4}",
+            tf_epochs, tf_loss
+        );
+    }
 
     println!(
         "Trained {} epochs on {} examples | avg loss: {:.4} | tokens: {}",
@@ -916,9 +965,15 @@ fn cmd_predict_next(
     };
 
     let results: Vec<(u32, f32)> = if use_transformer {
-        let embed_dim = trainer.embedder.dim;
-        let hidden_dim = (embed_dim * 2).max(8);
-        let transformer_predictor = TransformerPredictor::new(embed_dim, hidden_dim, max_context);
+        let transformer_path = transformer_model_path(brain_path);
+        let transformer_predictor = if transformer_path.exists() {
+            let model = TransformerLanguageModel::load_from_file(&transformer_path)?;
+            TransformerPredictor::from_model(&model, max_context)
+        } else {
+            let embed_dim = trainer.embedder.dim;
+            let hidden_dim = (embed_dim * 2).max(8);
+            TransformerPredictor::new(embed_dim, hidden_dim, max_context)
+        };
         transformer_predictor.predict_top_k_assisted(
             &network,
             &trainer.embedder,
@@ -984,9 +1039,15 @@ fn cmd_generate(
     }
 
     let text = if use_transformer {
-        let embed_dim = trainer.embedder.dim;
-        let hidden_dim = (embed_dim * 2).max(8);
-        let transformer_predictor = TransformerPredictor::new(embed_dim, hidden_dim, max_context);
+        let transformer_path = transformer_model_path(brain_path);
+        let transformer_predictor = if transformer_path.exists() {
+            let model = TransformerLanguageModel::load_from_file(&transformer_path)?;
+            TransformerPredictor::from_model(&model, max_context)
+        } else {
+            let embed_dim = trainer.embedder.dim;
+            let hidden_dim = (embed_dim * 2).max(8);
+            TransformerPredictor::new(embed_dim, hidden_dim, max_context)
+        };
         generate_text_with_transformer(
             &network,
             &trainer.embedder,
