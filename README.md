@@ -222,6 +222,7 @@ Auto-detected from keywords in the text. Stale neurons trigger automatic interne
 - **Enhanced system inspect (v0.7.2)** — `manas inspect` now shows separate sections for Core Network, Language System, Transformer, Storage, and Total; reports sidecar file sizes, transformer param counts, sequence memory status, and language metadata; `--verbose` flag for extended output
 - **Transformer FFN training (v0.8)** — `--train-transformer` now trains both the output head and the FeedForward layer inside the transformer block; gradient clipping to [-1, 1], NaN/inf safety; attention Q/K/V/O remain frozen; `manas inspect` reports `FFN trained : yes/no`
 - **Transformer training metrics (v0.8.1)** — `--train-transformer` now prints detailed metrics: per-epoch loss, pure transformer top-1/top-3 accuracy, loss improvement %, invalid update count, output head/FFN/attention status. Separate `--transformer-learning-rate` flag (default 0.01). `--transformer-only` flag on `predict-next` for pure-transformer debug predictions.
+- **Safer transformer training (v0.8.2)** — norm-based gradient clipping, loss explosion detection, instability rollback, pre-save finite check, separate "Training safety" output block. CLI flags: `--transformer-max-grad-norm`, `--transformer-max-loss`, `--no-transformer-rollback`.
 
 ## Current Limitations
 

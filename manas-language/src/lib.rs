@@ -344,6 +344,7 @@ const TRANSFORMER_SCORE_WEIGHT_TRAINED: f32 = 0.40;
 /// use this mapping so indices are always correct.
 ///
 /// The transformer block FFN weights are serialised from v0.8 onward.
+#[derive(Clone)]
 pub struct TransformerLanguageModel {
     pub block: TinyTransformerBlock,
     pub output_w: Vec<f32>,
@@ -851,7 +852,67 @@ pub struct LanguageTrainReport {
     pub neurons_grown: usize,
 }
 
-/// Report returned after transformer training (v0.8.1).
+/// Safety configuration for transformer training (v0.8.2).
+#[derive(Clone, Debug)]
+pub struct TransformerTrainingSafety {
+    /// Maximum allowed gradient norm before scaling (default 5.0).
+    pub max_gradient_norm: f32,
+    /// Maximum allowed per-example loss before marking as unstable (default 50.0).
+    pub max_loss: f32,
+    /// If epoch loss exceeds `first_epoch_loss * loss_explosion_factor`, mark unstable (default 5.0).
+    pub loss_explosion_factor: f32,
+    /// Whether to roll back model weights on serious instability (default true).
+    pub rollback_on_unstable: bool,
+}
+
+impl Default for TransformerTrainingSafety {
+    fn default() -> Self {
+        Self {
+            max_gradient_norm: 5.0,
+            max_loss: 50.0,
+            loss_explosion_factor: 5.0,
+            rollback_on_unstable: true,
+        }
+    }
+}
+
+/// Compute the L2 norm of a slice of values.
+pub fn gradient_norm(values: &[f32]) -> f32 {
+    values.iter().map(|&v| v * v).sum::<f32>().sqrt()
+}
+
+/// Clip gradients by global norm.  Returns `true` if clipping was applied.
+pub fn clip_by_norm(values: &mut [f32], max_norm: f32) -> bool {
+    if max_norm <= 0.0 || values.is_empty() {
+        return false;
+    }
+    let n = gradient_norm(values);
+    if n.is_finite() && n > max_norm {
+        let scale = max_norm / n;
+        for v in values.iter_mut() {
+            *v *= scale;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Check whether all trainable parameters of the model are finite (no NaN/inf).
+pub fn is_finite_model(model: &TransformerLanguageModel) -> bool {
+    if model.output_w.iter().any(|&v| !v.is_finite())
+        || model.output_b.iter().any(|&v| !v.is_finite())
+    {
+        return false;
+    }
+    let ff = &model.block.feed_forward;
+    ff.w1.iter().all(|&v| v.is_finite())
+        && ff.b1.iter().all(|&v| v.is_finite())
+        && ff.w2.iter().all(|&v| v.is_finite())
+        && ff.b2.iter().all(|&v| v.is_finite())
+}
+
+/// Report returned after transformer training (v0.8.1 / v0.8.2).
 #[derive(Clone, Debug)]
 pub struct TransformerTrainReport {
     pub epochs: usize,
@@ -868,6 +929,12 @@ pub struct TransformerTrainReport {
     pub ffn_trained: bool,
     pub attention_frozen: bool,
     pub invalid_updates: usize,
+    // v0.8.2 safety fields
+    pub max_gradient_norm_seen: f32,
+    pub avg_gradient_norm: f32,
+    pub clipped_updates: usize,
+    pub unstable_updates: usize,
+    pub rolled_back: bool,
 }
 
 /// Train the network on next-token prediction and populate the sequence memory.
@@ -1171,6 +1238,40 @@ pub fn train_transformer_output_head(
     transformer_lr: f32,
     language_lr: f32,
 ) -> TransformerTrainReport {
+    train_transformer_output_head_with_safety(
+        model,
+        embedder,
+        examples,
+        max_context,
+        epochs,
+        transformer_lr,
+        language_lr,
+        &TransformerTrainingSafety::default(),
+    )
+}
+
+/// Internal helper: snapshot the model weights before training for rollback.
+fn snapshot_model(model: &TransformerLanguageModel) -> TransformerLanguageModel {
+    model.clone()
+}
+
+/// Restore model from a snapshot (used on rollback).
+fn restore_model(model: &mut TransformerLanguageModel, snapshot: &TransformerLanguageModel) {
+    *model = snapshot.clone();
+}
+
+/// Full training function with safety configuration.
+#[allow(clippy::too_many_arguments)]
+pub fn train_transformer_output_head_with_safety(
+    model: &mut TransformerLanguageModel,
+    embedder: &Embedder,
+    examples: &[SequenceExample],
+    max_context: usize,
+    epochs: usize,
+    transformer_lr: f32,
+    language_lr: f32,
+    safety: &TransformerTrainingSafety,
+) -> TransformerTrainReport {
     let mut report = TransformerTrainReport {
         epochs,
         examples: examples.len(),
@@ -1186,16 +1287,30 @@ pub fn train_transformer_output_head(
         ffn_trained: model.ffn_trained,
         attention_frozen: true,
         invalid_updates: 0,
+        max_gradient_norm_seen: 0.0,
+        avg_gradient_norm: 0.0,
+        clipped_updates: 0,
+        unstable_updates: 0,
+        rolled_back: false,
     };
 
     if examples.is_empty() || model.vocab_size() == 0 {
         return report;
     }
 
+    // Take snapshot before training for potential rollback
+    let original_model = if safety.rollback_on_unstable {
+        Some(snapshot_model(model))
+    } else {
+        None
+    };
+
     let embed_dim = model.embed_dim;
     let mut total_loss = 0.0;
     let mut count = 0usize;
     let mut epoch_losses: Vec<f32> = Vec::new();
+    let mut grad_norm_sum = 0.0;
+    let mut grad_norm_count = 0usize;
 
     for _epoch_idx in 0..epochs {
         let mut epoch_loss = 0.0;
@@ -1240,6 +1355,16 @@ pub fn train_transformer_output_head(
             // Cross-entropy loss
             let p = probs[target_pos].max(1e-10);
             let loss = -p.ln();
+
+            // ── Loss explosion detection ─────────────────────────────
+            if !loss.is_finite() {
+                report.invalid_updates += 1;
+                continue;
+            }
+            if loss > safety.max_loss {
+                report.unstable_updates += 1;
+                continue;
+            }
             epoch_loss += loss;
             epoch_count += 1;
 
@@ -1263,27 +1388,58 @@ pub fn train_transformer_output_head(
                 }
             }
 
-            // Update output head weights
-            for (v, g) in grads.iter().enumerate() {
+            // ── Norm-based gradient clipping for output head ──────────
+            let mut flat_grads: Vec<f32> = Vec::new();
+            for &g in &grads {
                 if g.abs() < 1e-10 {
                     continue;
                 }
-                for (i, &val) in last.iter().enumerate().take(embed_dim) {
-                    let idx = v * embed_dim + i;
-                    model.output_w[idx] -= transformer_lr * g * val;
+                for &val in last.iter().take(embed_dim) {
+                    flat_grads.push(g * val);
                 }
-                model.output_b[v] -= transformer_lr * g;
+                flat_grads.push(g); // bias gradient
             }
 
-            // Backprop through residual add 2 into FFN output:
-            //   block_output[last] = last_ffn_input + ffn_output
-            //   dL/d(ffn_output)   = dL/d(block_output[last])
+            let head_norm = gradient_norm(&flat_grads);
+            if head_norm.is_finite() {
+                if head_norm > report.max_gradient_norm_seen {
+                    report.max_gradient_norm_seen = head_norm;
+                }
+                grad_norm_sum += head_norm;
+                grad_norm_count += 1;
+            }
+
+            if clip_by_norm(&mut flat_grads, safety.max_gradient_norm) {
+                report.clipped_updates += 1;
+            }
+
+            // Update output head weights using (possibly clipped) gradients
+            let mut idx = 0usize;
+            for (v, &g) in grads.iter().enumerate() {
+                if g.abs() < 1e-10 {
+                    continue;
+                }
+                let base = v * embed_dim;
+                for i in 0..embed_dim {
+                    model.output_w[base + i] -= transformer_lr * flat_grads[idx];
+                    idx += 1;
+                }
+                model.output_b[v] -= transformer_lr * flat_grads[idx];
+                idx += 1;
+            }
+
+            // Backprop through residual add 2 into FFN output
             for g in &mut grad_block {
                 *g = g.clamp(-1.0, 1.0);
             }
             if grad_block.iter().any(|&g| !g.is_finite()) {
                 report.invalid_updates += 1;
                 continue;
+            }
+
+            // Norm clip FFN gradients
+            if clip_by_norm(&mut grad_block, safety.max_gradient_norm) {
+                report.clipped_updates += 1;
             }
 
             let ffn_lr = transformer_lr * 0.5;
@@ -1303,8 +1459,41 @@ pub fn train_transformer_output_head(
             epoch_losses.push(avg_epoch_loss);
             total_loss += epoch_loss;
             count += epoch_count;
+
+            // ── Loss explosion detection across epochs ────────────────
+            if epoch_losses.len() > 1
+                && epoch_losses[0].is_finite()
+                && epoch_losses[0].abs() > 1e-10
+                && avg_epoch_loss > epoch_losses[0] * safety.loss_explosion_factor
+            {
+                report.unstable_updates += epoch_count;
+            }
         }
     }
+
+    // Set gradient norm stats
+    if grad_norm_count > 0 {
+        report.avg_gradient_norm = grad_norm_sum / grad_norm_count as f32;
+    }
+
+    // ── Rollback if model is corrupted ───────────────────────────────
+    if !is_finite_model(model) || count == 0 {
+        if let Some(ref snap) = original_model
+            && safety.rollback_on_unstable
+        {
+            restore_model(model, snap);
+            report.rolled_back = true;
+        }
+        // Return early with safe report (no loss/accuracy from corrupted state)
+        if !is_finite_model(model) {
+            return report;
+        }
+    }
+
+    // ── Post-training evaluation (only if model is healthy) ───────────
+    let eval = evaluate_transformer_on_examples(model, embedder, examples, max_context);
+    report.top1_accuracy = eval.top1_accuracy;
+    report.top3_accuracy = eval.top3_accuracy;
 
     // Set loss metrics
     if !epoch_losses.is_empty() {
@@ -1322,11 +1511,6 @@ pub fn train_transformer_output_head(
     report.output_head_trained =
         model.output_w.iter().any(|&v| v != 0.0) || model.output_b.iter().any(|&v| v != 0.0);
     report.ffn_trained = model.ffn_trained;
-
-    // Evaluate pure transformer metrics on final model
-    let eval = evaluate_transformer_on_examples(model, embedder, examples, max_context);
-    report.top1_accuracy = eval.top1_accuracy;
-    report.top3_accuracy = eval.top3_accuracy;
 
     report
 }
@@ -3082,6 +3266,11 @@ mod tests {
             ffn_trained: false,
             attention_frozen: true,
             invalid_updates: 0,
+            max_gradient_norm_seen: 0.0,
+            avg_gradient_norm: 0.0,
+            clipped_updates: 0,
+            unstable_updates: 0,
+            rolled_back: false,
         };
         if let (Some(f), Some(l)) = (report.first_loss, report.final_loss)
             && f.abs() > 1e-10
@@ -3114,7 +3303,13 @@ mod tests {
             ffn_trained: false,
             attention_frozen: true,
             invalid_updates: 0,
+            max_gradient_norm_seen: 0.0,
+            avg_gradient_norm: 0.0,
+            clipped_updates: 0,
+            unstable_updates: 0,
+            rolled_back: false,
         };
+
         // This should not panic
         if let (Some(f), Some(l)) = (report.first_loss, report.final_loss)
             && f.abs() > 1e-10
@@ -3146,6 +3341,11 @@ mod tests {
             ffn_trained: true,
             attention_frozen: true,
             invalid_updates: 0,
+            max_gradient_norm_seen: 0.0,
+            avg_gradient_norm: 0.0,
+            clipped_updates: 0,
+            unstable_updates: 0,
+            rolled_back: false,
         };
 
         let formatted = format!(
@@ -3363,6 +3563,142 @@ mod tests {
         assert_eq!(
             eval.top3_accuracy, 0.0,
             "token 50 should not be in top-3 with 5 vocab entries"
+        );
+    }
+
+    // ── v0.8.2 Safety tests ─────────────────────────────────────────
+
+    /// Test A: gradient_norm([3, 4]) = 5.
+    #[test]
+    fn safety_gradient_norm() {
+        let v = vec![3.0, 4.0];
+        let n = gradient_norm(&v);
+        assert!((n - 5.0).abs() < 1e-6, "norm should be 5, got {}", n);
+    }
+
+    /// Test B: clip_by_norm scales [6,8] to norm ≤ 5.
+    #[test]
+    fn safety_clip_by_norm() {
+        let mut v = vec![6.0, 8.0];
+        let clipped = clip_by_norm(&mut v, 5.0);
+        assert!(clipped, "should have clipped");
+        let n = gradient_norm(&v);
+        assert!(
+            (n - 5.0).abs() < 1e-6,
+            "norm should be ~5 after clipping, got {}",
+            n
+        );
+        // Direction should be preserved: 6:8 = 3:4
+        assert!(
+            (v[0] / v[1] - 0.75).abs() < 1e-6,
+            "direction should be preserved"
+        );
+    }
+
+    /// Test C: fresh model is finite.
+    #[test]
+    fn safety_finite_model_fresh() {
+        let model = TransformerLanguageModel::new(4, 8, vec![10, 20, 30]);
+        assert!(is_finite_model(&model), "fresh model should be finite");
+    }
+
+    /// Test D: model with NaN weight is detected as non-finite.
+    #[test]
+    fn safety_non_finite_model_detected() {
+        let mut model = TransformerLanguageModel::new(4, 8, vec![10, 20, 30]);
+        model.output_w[0] = f32::NAN;
+        assert!(
+            !is_finite_model(&model),
+            "NaN in output_w should be detected"
+        );
+    }
+
+    /// Test E: rollback restores finite weights after corruption.
+    #[test]
+    fn safety_rollback_restores_finite() {
+        let mut model = TransformerLanguageModel::new(4, 8, vec![10, 20, 30]);
+        let snapshot = snapshot_model(&model);
+        // Simulate corruption
+        let last = model.output_w.len() - 1;
+        model.output_w[last] = f32::INFINITY;
+        assert!(
+            !is_finite_model(&model),
+            "should be non-finite after corruption"
+        );
+        // Rollback
+        restore_model(&mut model, &snapshot);
+        assert!(is_finite_model(&model), "should be finite after rollback");
+        // Verify weights are identical
+        for (a, b) in model.output_w.iter().zip(snapshot.output_w.iter()) {
+            assert!((a - b).abs() < 1e-6, "weights should match after rollback");
+        }
+    }
+
+    /// Test F: normal training with default safety — no rollback, generation works.
+    #[test]
+    fn safety_normal_training_no_rollback() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+
+        let text = "Rust is a systems programming language";
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            text,
+            5,
+            10,
+            0.05,
+            5,
+        )
+        .unwrap();
+
+        let embed_dim = trainer.embedder.dim;
+        let hidden_dim = (embed_dim * 2).max(8);
+        let mut vocab_order: Vec<u32> = trainer.embedder.table.keys().copied().collect();
+        vocab_order.sort();
+        let tokens = trainer.tokenizer.encode(text);
+        let examples = build_sequence_examples(&tokens, 5);
+
+        let mut model = TransformerLanguageModel::new(embed_dim, hidden_dim, vocab_order);
+        let report = train_transformer_output_head_with_safety(
+            &mut model,
+            &trainer.embedder,
+            &examples,
+            5,
+            10,
+            0.01,
+            0.05,
+            &TransformerTrainingSafety::default(),
+        );
+
+        assert!(
+            !report.rolled_back,
+            "should not roll back in normal training"
+        );
+        assert!(report.avg_loss.is_finite(), "avg_loss should be finite");
+        assert!(report.top1_accuracy >= 0.0, "top1_accuracy should be >= 0");
+
+        // Generation should still work after training
+        let predictor = TransformerPredictor::from_model(&model, 5);
+        let mut tok = trainer.tokenizer.clone();
+        let prompt_tokens = tok.encode("Rust is a");
+        let results = predictor.predict_top_k_assisted(
+            &network,
+            &trainer.embedder,
+            &seq_memory,
+            &prompt_tokens,
+            3,
+        );
+        let words: Vec<String> = results
+            .iter()
+            .filter_map(|(id, _)| trainer.tokenizer.decode(*id).map(|s| s.to_string()))
+            .collect();
+        assert!(
+            words.contains(&"systems".to_string()),
+            "'systems' in top 3 for 'Rust is a', got: {:?}",
+            words
         );
     }
 }

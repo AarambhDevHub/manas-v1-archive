@@ -21,6 +21,7 @@ Manas is **not** trying to replace large hosted LLMs. It is a learning and resea
 | v0.7.2 | Better inspect for language and transformer state | Done |
 | v0.8 | Train transformer FeedForward layer | Done |
 | v0.8.1 | Transformer training metrics | Done |
+| v0.8.2 | Safer transformer training | Done |
 
 ## Completed Milestones
 
@@ -297,20 +298,51 @@ Goal achieved:
 
 ## v0.8.2 — Safer Transformer Training
 
-Before training deeper parts of the transformer, training safety should improve.
+Before training deeper parts of the transformer, training safety was improved.
 
-### Planned Safety Features
+### Completed Safety Features
 
-- Gradient clipping
-- NaN detection
-- Infinite-value detection
-- Loss explosion guard
-- Learning-rate safety checks
-- Optional rollback if training corrupts state
+- **`TransformerTrainingSafety` config** — `max_gradient_norm` (5.0), `max_loss` (50.0), `loss_explosion_factor` (5.0), `rollback_on_unstable` (true)
+- **Norm-based gradient clipping** — `gradient_norm()` / `clip_by_norm()` helper functions applied to both output head and FFN gradients
+- **Gradient norm tracking** — `max_gradient_norm_seen`, `avg_gradient_norm`, `clipped_updates` in report
+- **Loss explosion detection** — NaN/inf loss → invalid update; loss > `max_loss` → unstable; epoch loss > first epoch × explosion_factor → unstable
+- **Rollback** — snapshot before training, restore if model becomes non-finite or no examples evaluated
+- **`is_finite_model()`** — pre-save check prevents saving corrupted transformer state
+- **CLI safety block** — separate "Training safety" section in output with max/avg grad norm, clipped/invalid/unstable updates, rollback status
+- **CLI flags** — `--transformer-max-grad-norm`, `--transformer-max-loss`, `--no-transformer-rollback`
+- **6 new tests** (A: gradient norm, B: norm clipping, C: finite fresh model, D: NaN detection, E: rollback, F: normal training unchanged; 54 total)
+- All generation, prediction, default non-transformer path unchanged
+
+### CLI Output Example
+
+```text
+Transformer training
+  epochs                           : 100
+  examples                         : 10
+  language lr                      : 0.0500
+  transformer lr                   : 0.0500
+  avg train loss                   : 0.0749
+  first epoch loss                 : 2.4240
+  final epoch loss                 : 0.0069
+  improvement                      : 99.72%
+  pure transformer top-1 accuracy  : 100.00%
+  pure transformer top-3 accuracy  : 100.00%
+  output head                      : trained
+  feed-forward                     : trained
+  attention                        : frozen
+
+Training safety
+  max grad norm before clipping    : 1.2345
+  avg grad norm                    : 0.1234
+  clipped updates                  : 0
+  invalid updates                  : 0
+  unstable updates                 : 0
+  rolled back                      : no
+```
 
 ### Goal
 
-> Make transformer training safer before attention weights are trained.
+> Transformer training is now safer with gradient norm clipping, loss explosion detection, and rollback.
 
 ---
 

@@ -4,9 +4,10 @@ use manas_core::{ManasError, Network, Neuron, Source};
 use manas_ingest::{IngestPipeline, IngestSource};
 use manas_language::{
     LanguageMeta, NextTokenPredictor, SequenceMemory, TransformerLanguageModel,
-    TransformerPredictor, build_sequence_examples, generate_text_with_memory,
-    generate_text_with_transformer, language_meta_path, seq_memory_path, text_hash,
-    train_next_token_examples, train_transformer_output_head, transformer_model_path,
+    TransformerPredictor, TransformerTrainingSafety, build_sequence_examples,
+    generate_text_with_memory, generate_text_with_transformer, language_meta_path, seq_memory_path,
+    text_hash, train_next_token_examples, train_transformer_output_head_with_safety,
+    transformer_model_path,
 };
 use manas_learn::{Trainer, TrainerSnapshot, decode, detect_freshness_category};
 use manas_store::ManasBrain;
@@ -93,6 +94,12 @@ enum Commands {
         max_new_neurons: usize,
         #[arg(long)]
         no_grow: bool,
+        #[arg(long, default_value = "5.0")]
+        transformer_max_grad_norm: f32,
+        #[arg(long, default_value = "50.0")]
+        transformer_max_loss: f32,
+        #[arg(long)]
+        no_transformer_rollback: bool,
     },
     PredictNext {
         text: String,
@@ -160,6 +167,9 @@ fn main() {
             transformer_learning_rate,
             max_new_neurons,
             no_grow,
+            transformer_max_grad_norm,
+            transformer_max_loss,
+            no_transformer_rollback,
         } => cmd_train_language(
             text,
             *max_context,
@@ -169,6 +179,9 @@ fn main() {
             *transformer_learning_rate,
             *max_new_neurons,
             *no_grow,
+            *transformer_max_grad_norm,
+            *transformer_max_loss,
+            *no_transformer_rollback,
             &brain_path,
         ),
         Commands::PredictNext {
@@ -1086,6 +1099,9 @@ fn cmd_train_language(
     transformer_learning_rate: f32,
     max_new_neurons: usize,
     no_grow: bool,
+    transformer_max_grad_norm: f32,
+    transformer_max_loss: f32,
+    no_transformer_rollback: bool,
     brain_path: &Path,
 ) -> Result<(), ManasError> {
     let brain = ManasBrain::new(brain_path);
@@ -1164,7 +1180,13 @@ fn cmd_train_language(
         let examples = build_sequence_examples(&tokens, max_context);
 
         let tf_epochs = epochs.max(10);
-        let tf_report = train_transformer_output_head(
+        let safety = TransformerTrainingSafety {
+            max_gradient_norm: transformer_max_grad_norm,
+            max_loss: transformer_max_loss,
+            rollback_on_unstable: !no_transformer_rollback,
+            ..TransformerTrainingSafety::default()
+        };
+        let tf_report = train_transformer_output_head_with_safety(
             &mut model,
             &trainer.embedder,
             &examples,
@@ -1172,9 +1194,15 @@ fn cmd_train_language(
             tf_epochs,
             transformer_learning_rate,
             learning_rate,
+            &safety,
         );
 
-        model.save_to_file(&transformer_path)?;
+        // Only save if model is finite (not corrupted)
+        if manas_language::is_finite_model(&model) {
+            model.save_to_file(&transformer_path)?;
+        } else {
+            println!("Warning: transformer model corrupted — not saving");
+        }
 
         println!(
             "Transformer training\n\
@@ -1191,7 +1219,14 @@ fn cmd_train_language(
              \x20 output head                      : {}\n\
              \x20 feed-forward                     : {}\n\
              \x20 attention                        : {}\n\
-             \x20 invalid updates                  : {}",
+             \n\
+             Training safety\n\
+             \x20 max grad norm before clipping    : {:.4}\n\
+             \x20 avg grad norm                    : {:.4}\n\
+             \x20 clipped updates                  : {}\n\
+             \x20 invalid updates                  : {}\n\
+             \x20 unstable updates                 : {}\n\
+             \x20 rolled back                      : {}",
             tf_report.epochs,
             tf_report.examples,
             tf_report.language_lr,
@@ -1223,7 +1258,12 @@ fn cmd_train_language(
             } else {
                 "trainable"
             },
+            tf_report.max_gradient_norm_seen,
+            tf_report.avg_gradient_norm,
+            tf_report.clipped_updates,
             tf_report.invalid_updates,
+            tf_report.unstable_updates,
+            if tf_report.rolled_back { "yes" } else { "no" },
         );
     }
 
