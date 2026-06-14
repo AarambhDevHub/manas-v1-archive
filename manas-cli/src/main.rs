@@ -1308,7 +1308,16 @@ fn cmd_train_language(
              \x20 clipped updates                  : {}\n\
              \x20 invalid updates                  : {}\n\
              \x20 unstable updates                 : {}\n\
-             \x20 rolled back                      : {}",
+             \x20 rolled back                      : {}\n\
+             \n\
+             Attention safety\n\
+             \x20 projections trained              : {}\n\
+             \x20 attention update attempts        : {}\n\
+             \x20 attention updates applied        : {}\n\
+             \x20 attention clipped updates        : {}\n\
+             \x20 attention invalid updates        : {}\n\
+             \x20 max attention grad norm          : {:.4}\n\
+             \x20 avg attention grad norm          : {:.4}",
             tf_report.epochs,
             tf_report.examples,
             tf_report.language_lr,
@@ -1354,6 +1363,18 @@ fn cmd_train_language(
             tf_report.invalid_updates,
             tf_report.unstable_updates,
             if tf_report.rolled_back { "yes" } else { "no" },
+            format_attention_projections(
+                tf_report.attention_projection_o_trained,
+                tf_report.attention_projection_v_trained,
+                tf_report.attention_projection_q_trained,
+                tf_report.attention_projection_k_trained,
+            ),
+            tf_report.attention_update_attempts,
+            tf_report.attention_updates_applied,
+            tf_report.attention_clipped_updates,
+            tf_report.attention_invalid_updates,
+            tf_report.max_attention_grad_norm,
+            tf_report.avg_attention_grad_norm,
         );
     }
 

@@ -26,7 +26,7 @@ Manas is **not** trying to replace large hosted LLMs. It is a learning and resea
 | v0.9.1 | Train attention output projection w_o | Done |
 | v0.9.2 | Train attention value projection w_v | Done |
 | v0.9.3 | Train attention query/key projections w_q + w_k | Done |
-| v0.9.4 | Attention training safety and metrics cleanup | Planned |
+| v0.9.4 | Attention training safety and metrics cleanup | Done |
 | v0.9.5 | Improve transformer score weight | Planned |
 
 ## Completed Milestones
@@ -421,25 +421,39 @@ Goal achieved:
 
 ---
 
-## Next Milestones
+### v0.9.4 — Attention Training Safety and Metrics Cleanup
 
-## v0.9.4 — Attention Training Safety and Metrics Cleanup
+Manas now reports attention-specific safety metrics and strengthens rollback/persistence guards after `w_o`, `w_v`, `w_q`, and `w_k` training.
 
-Finalize attention-training reporting and safety.
+Completed:
 
-### Scope
+- `AttentionTrainStepReport` now records whether an attention update was attempted plus the pre-clip gradient norm
+- Attention update reports are consistent across `w_o`, `w_v`, and `w_q/w_k`
+- Transformer training reports compact attention-specific safety metrics:
+  - attention update attempts
+  - attention updates applied
+  - attention clipped updates
+  - attention invalid updates
+  - max attention gradient norm
+  - average attention gradient norm
+- Global safety counters still report max/avg gradient norm, clipped updates, invalid updates, unstable updates, and rollback status
+- Attention metrics are counted once per attention helper call without double-counting global counters
+- `TransformerLanguageModel::save_to_file()` refuses to save non-finite transformer models
+- Assisted and transformer-only prediction paths filter non-finite scores before sorting
+- Epoch loss explosions trigger rollback when rollback is enabled
+- Rollback restores output head, FFN, `w_o`, `w_v`, `w_q`, `w_k`, `ffn_trained`, `attention_trained`, and the projection bitmask
+- Legacy v3 files without a projection bitmask still load as `o`
+- v3 projection bitmask files still round-trip `o,v,q,k`
+- Inspect remains conservative: `Attention trained : partial` and `Attention projections : o,v,q,k`
+- No scoring weight change, generation behavior change, tokenizer change, sequence memory change, model dimension change, sidecar version bump, multi-head attention, layer norm, dynamic transformer growth, or training math rewrite
 
-- Show trained projections clearly: `o`, `v`, `q`, `k`
-- Report attention gradient norms separately if useful
-- Ensure rollback restores attention weights
-- Ensure old transformer files still load
-- Ensure inspect and README examples are accurate
-
-### Goal
+Goal achieved:
 
 > Make attention training measurable, safe, and easy to debug.
 
 ---
+
+## Next Milestones
 
 ## v0.9.5 — Improve Transformer Score Weight
 
@@ -639,5 +653,5 @@ Manas should continue following these principles:
 The next coding milestone is:
 
 ```text
-v0.9.4 — Attention Training Safety and Metrics Cleanup
+v0.9.5 — Improve Transformer Score Weight
 ```
