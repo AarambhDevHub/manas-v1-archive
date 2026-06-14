@@ -477,6 +477,229 @@ final_score = 0.40 * existing_hybrid_score + 0.60 * transformer_score
 
 > Move more prediction responsibility from memory shortcut to the trained transformer path.
 
+Add a future roadmap milestone after v0.9.5:
+
+---
+
+## v0.9.6 — Unified Teaching Command
+
+### Goal
+
+Manas currently has multiple learning commands:
+
+```txt
+learn
+ingest
+train-language
+```
+
+This is powerful but not ideal for normal users because teaching a file/folder requires multiple commands.
+
+Add a unified command:
+
+```bash
+manas teach <PATH_OR_TEXT>
+```
+
+The command should support:
+
+```bash
+manas teach "Manas is a local-first AI memory system"
+manas teach teach/identity.md
+manas teach teach/
+```
+
+### Behavior
+
+For text input:
+
+```bash
+manas teach "Manas is written in Rust" --train-transformer
+```
+
+It should:
+
+* learn text into core memory
+* train language memory
+* train transformer if `--train-transformer` is passed
+
+For file input:
+
+```bash
+manas teach teach/identity.md --train-transformer
+```
+
+It should:
+
+* ingest the file into source-aware memory
+* extract readable text from the file
+* train language memory from that text
+* train transformer if enabled
+* preserve source path metadata
+
+For folder input:
+
+```bash
+manas teach teach/ --train-transformer
+```
+
+It should:
+
+* recursively read supported files
+* ingest each file
+* train language memory from each file
+* train transformer from each file
+* preserve per-file source metadata
+* show a summary report
+
+### Supported file types
+
+Start simple:
+
+```txt
+.md
+.txt
+```
+
+Do not add PDF/DOCX yet.
+
+### CLI flags
+
+Suggested flags:
+
+```bash
+manas teach <INPUT> \
+  --max-context 5 \
+  --epochs 100 \
+  --learning-rate 0.05 \
+  --train-transformer \
+  --transformer-learning-rate 0.05
+```
+
+Optional:
+
+```bash
+--recursive
+--include "*.md"
+--dry-run
+```
+
+### Output report
+
+Example:
+
+```txt
+Teaching complete
+
+Core memory
+  files ingested        : 3
+  text chunks learned   : 3
+  source metadata       : preserved
+
+Language memory
+  sequence training     : yes
+  transformer training  : yes
+  total tokens          : ...
+
+Transformer
+  output head           : trained
+  feed-forward          : trained
+  attention             : partial
+  projections           : o,v,q,k
+
+Safety
+  invalid updates       : 0
+  unstable updates      : 0
+  rolled back           : no
+```
+
+### Strict rules
+
+Do not remove existing commands.
+
+Keep these working:
+
+```txt
+learn
+ingest
+train-language
+predict-next
+generate
+```
+
+`teach` is a higher-level convenience command built on top of existing logic.
+
+Do not change transformer math.
+
+Do not change tokenizer.
+
+Do not change generation behavior.
+
+Do not change sidecar version.
+
+### Tests
+
+Add tests for:
+
+* teaching direct text
+* teaching one `.md` file
+* teaching one `.txt` file
+* teaching folder with multiple files
+* unsupported files are skipped safely
+* source metadata is preserved
+* language memory is trained
+* transformer training works from file text
+* predictions work after teaching file
+* dry-run does not mutate brain
+* old commands still work
+
+### Example validation
+
+Create:
+
+```bash
+mkdir -p teach
+cat > teach/identity.md <<'EOF'
+Manas is a local-first AI memory system written in Rust.
+Manas learns from text and files.
+Manas stores persistent memory in a .manas brain file.
+Manas uses custom transformer training.
+Manas is not a ChatGPT clone.
+EOF
+```
+
+Run:
+
+```bash
+./target/release/manas teach teach/identity.md \
+  --max-context 5 \
+  --epochs 100 \
+  --learning-rate 0.05 \
+  --train-transformer \
+  --transformer-learning-rate 0.05
+```
+
+Then test:
+
+```bash
+./target/release/manas predict-next "Manas is" --use-transformer --max-context 5 --top-k 5
+./target/release/manas generate "Manas is" --use-transformer --max-context 5 --max-tokens 30
+./target/release/manas inspect --verbose
+```
+
+Expected:
+
+```txt
+Manas is -> a / local-first
+generate -> manas is a local-first ai memory system written in rust
+```
+
+### Milestone name
+
+```txt
+v0.9.6 — Unified Teaching Command
+```
+
 ---
 
 ## v1.0 — Stable Mini Local Language Model Release
