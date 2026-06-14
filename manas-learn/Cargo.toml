@@ -12,4 +12,4 @@ description = "Manas learn — tokenizer, embedder, backpropagation, online lear
 manas-core = { workspace = true }
 manas-memory = { workspace = true }
 manas-store = { workspace = true }
-rand = "0.8"
+rand = "0.10"

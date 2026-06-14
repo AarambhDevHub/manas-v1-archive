@@ -9,4 +9,4 @@ homepage.workspace = true
 description = "Manas core — neurons, layers, forward pass, growth logic"
 
 [dependencies]
-rand = "0.8"
+rand = "0.10"
