@@ -23,6 +23,11 @@ Manas is **not** trying to replace large hosted LLMs. It is a learning and resea
 | v0.8.1 | Transformer training metrics | Done |
 | v0.8.2 | Safer transformer training | Done |
 | v0.9.0 | Attention cache + persistence prep | Done |
+| v0.9.1 | Train attention output projection w_o | Planned |
+| v0.9.2 | Train attention value projection w_v | Planned |
+| v0.9.3 | Train attention query/key projections w_q + w_k | Planned |
+| v0.9.4 | Attention training safety and metrics cleanup | Planned |
+| v0.9.5 | Improve transformer score weight | Planned |
 
 ## Completed Milestones
 
@@ -343,32 +348,80 @@ Goal achieved:
 
 ## Next Milestones
 
-## v0.9 — Train Attention Projections
+## v0.9.1 — Train Attention Output Projection `w_o`
 
-After FFN training and v0.9.0 cache/persistence prep are stable, train the attention projection matrices.
-
-### Planned Trainable Weights
-
-- `w_q`
-- `w_k`
-- `w_v`
-- `w_o`
+Train only the attention output projection.
 
 ### Scope
 
-- Single-head attention only
-- Small context windows
-- Small vocab first
-- Gradient clipping required
-- Strong tests required
+- Train `w_o`
+- Keep `w_q`, `w_k`, `w_v` frozen
+- Use existing attention cache
+- Include `w_o` gradients in safety metrics
+- Persist trained `w_o`
+- Inspect should show partial attention training
 
 ### Goal
 
-> Make the transformer learn context and token order more deeply instead of relying mostly on sequence memory.
+> Make the safest attention projection learn first without touching softmax/QK gradients.
 
 ---
 
-## v0.9.1 — Improve Transformer Score Weight
+## v0.9.2 — Train Attention Value Projection `w_v`
+
+Train value projection after `w_o` is stable.
+
+### Scope
+
+- Train `w_v`
+- Keep `w_q`, `w_k` frozen
+- Continue training output head, FFN, and `w_o`
+- Use cached attention probabilities
+- Add tests proving `w_v` changes and `w_q/w_k` remain frozen
+
+### Goal
+
+> Allow attention to learn better value representations while avoiding Q/K softmax-gradient risk.
+
+---
+
+## v0.9.3 — Train Attention Query/Key Projections `w_q + w_k`
+
+Train query and key projections only after `w_o` and `w_v` are stable.
+
+### Scope
+
+- Train `w_q`
+- Train `w_k`
+- Use causal softmax gradients
+- Add finite-difference checks for selected parameters
+- Keep single-head attention only
+
+### Goal
+
+> Let Manas learn attention routing and context selection directly.
+
+---
+
+## v0.9.4 — Attention Training Safety and Metrics Cleanup
+
+Finalize attention-training reporting and safety.
+
+### Scope
+
+- Show trained projections clearly: `o`, `v`, `q`, `k`
+- Report attention gradient norms separately if useful
+- Ensure rollback restores attention weights
+- Ensure old transformer files still load
+- Ensure inspect and README examples are accurate
+
+### Goal
+
+> Make attention training measurable, safe, and easy to debug.
+
+---
+
+## v0.9.5 — Improve Transformer Score Weight
 
 Currently the system uses a conservative hybrid score so transformer experiments do not break generation.
 
@@ -378,7 +431,7 @@ Example:
 final_score = 0.60 * existing_hybrid_score + 0.40 * transformer_score
 ```
 
-After transformer training improves, slowly increase transformer contribution.
+After attention projection training is stable, slowly increase transformer contribution.
 
 Possible future setting:
 
@@ -566,5 +619,5 @@ Manas should continue following these principles:
 The next coding milestone is:
 
 ```text
-v0.9 — Train Attention Projections
+v0.9.1 — Train Attention Output Projection w_o
 ```
