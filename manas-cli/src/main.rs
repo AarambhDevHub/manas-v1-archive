@@ -4,9 +4,10 @@ use manas_core::{ManasError, Network, Neuron, Source};
 use manas_ingest::{IngestPipeline, IngestSource};
 use manas_language::{
     LanguageMeta, NextTokenPredictor, SequenceMemory, TransformerLanguageModel,
-    TransformerPredictor, build_sequence_examples, generate_text_with_memory,
-    generate_text_with_transformer, language_meta_path, seq_memory_path, text_hash,
-    train_next_token_examples, train_transformer_output_head, transformer_model_path,
+    TransformerPredictor, TransformerTrainingSafety, build_sequence_examples,
+    generate_text_with_memory, generate_text_with_transformer, language_meta_path, seq_memory_path,
+    text_hash, train_next_token_examples, train_transformer_output_head_with_safety,
+    transformer_model_path,
 };
 use manas_learn::{Trainer, TrainerSnapshot, decode, detect_freshness_category};
 use manas_store::ManasBrain;
@@ -87,10 +88,18 @@ enum Commands {
         learning_rate: f32,
         #[arg(long)]
         train_transformer: bool,
+        #[arg(long, default_value = "0.01")]
+        transformer_learning_rate: f32,
         #[arg(long, default_value = "10")]
         max_new_neurons: usize,
         #[arg(long)]
         no_grow: bool,
+        #[arg(long, default_value = "5.0")]
+        transformer_max_grad_norm: f32,
+        #[arg(long, default_value = "50.0")]
+        transformer_max_loss: f32,
+        #[arg(long)]
+        no_transformer_rollback: bool,
     },
     PredictNext {
         text: String,
@@ -100,6 +109,8 @@ enum Commands {
         top_k: usize,
         #[arg(long)]
         use_transformer: bool,
+        #[arg(long)]
+        transformer_only: bool,
     },
     Generate {
         prompt: String,
@@ -153,16 +164,24 @@ fn main() {
             epochs,
             learning_rate,
             train_transformer,
+            transformer_learning_rate,
             max_new_neurons,
             no_grow,
+            transformer_max_grad_norm,
+            transformer_max_loss,
+            no_transformer_rollback,
         } => cmd_train_language(
             text,
             *max_context,
             *epochs,
             *learning_rate,
             *train_transformer,
+            *transformer_learning_rate,
             *max_new_neurons,
             *no_grow,
+            *transformer_max_grad_norm,
+            *transformer_max_loss,
+            *no_transformer_rollback,
             &brain_path,
         ),
         Commands::PredictNext {
@@ -170,7 +189,15 @@ fn main() {
             max_context,
             top_k,
             use_transformer,
-        } => cmd_predict_next(text, *max_context, *top_k, *use_transformer, &brain_path),
+            transformer_only,
+        } => cmd_predict_next(
+            text,
+            *max_context,
+            *top_k,
+            *use_transformer,
+            *transformer_only,
+            &brain_path,
+        ),
         Commands::Generate {
             prompt,
             max_tokens,
@@ -1069,8 +1096,12 @@ fn cmd_train_language(
     epochs: usize,
     learning_rate: f32,
     train_transformer: bool,
+    transformer_learning_rate: f32,
     max_new_neurons: usize,
     no_grow: bool,
+    transformer_max_grad_norm: f32,
+    transformer_max_loss: f32,
+    no_transformer_rollback: bool,
     brain_path: &Path,
 ) -> Result<(), ManasError> {
     let brain = ManasBrain::new(brain_path);
@@ -1148,22 +1179,91 @@ fn cmd_train_language(
         let tokens = trainer.tokenizer.encode(text);
         let examples = build_sequence_examples(&tokens, max_context);
 
-        let transformer_lr = learning_rate * 0.2;
         let tf_epochs = epochs.max(10);
-        let tf_loss = train_transformer_output_head(
+        let safety = TransformerTrainingSafety {
+            max_gradient_norm: transformer_max_grad_norm,
+            max_loss: transformer_max_loss,
+            rollback_on_unstable: !no_transformer_rollback,
+            ..TransformerTrainingSafety::default()
+        };
+        let tf_report = train_transformer_output_head_with_safety(
             &mut model,
             &trainer.embedder,
             &examples,
             max_context,
             tf_epochs,
-            transformer_lr,
+            transformer_learning_rate,
+            learning_rate,
+            &safety,
         );
 
-        model.save_to_file(&transformer_path)?;
+        // Only save if model is finite (not corrupted)
+        if manas_language::is_finite_model(&model) {
+            model.save_to_file(&transformer_path)?;
+        } else {
+            println!("Warning: transformer model corrupted — not saving");
+        }
 
         println!(
-            "Trained transformer output head: {} epochs, avg loss: {:.4}",
-            tf_epochs, tf_loss
+            "Transformer training\n\
+             \x20 epochs                           : {}\n\
+             \x20 examples                         : {}\n\
+             \x20 language lr                      : {:.4}\n\
+             \x20 transformer lr                   : {:.4}\n\
+             \x20 avg train loss                   : {:.4}\n\
+             \x20 first epoch loss                 : {}\n\
+             \x20 final epoch loss                 : {}\n\
+             \x20 improvement                      : {}\n\
+             \x20 pure transformer top-1 accuracy  : {:.2}%\n\
+             \x20 pure transformer top-3 accuracy  : {:.2}%\n\
+             \x20 output head                      : {}\n\
+             \x20 feed-forward                     : {}\n\
+             \x20 attention                        : {}\n\
+             \n\
+             Training safety\n\
+             \x20 max grad norm before clipping    : {:.4}\n\
+             \x20 avg grad norm                    : {:.4}\n\
+             \x20 clipped updates                  : {}\n\
+             \x20 invalid updates                  : {}\n\
+             \x20 unstable updates                 : {}\n\
+             \x20 rolled back                      : {}",
+            tf_report.epochs,
+            tf_report.examples,
+            tf_report.language_lr,
+            tf_report.transformer_lr,
+            tf_report.avg_loss,
+            tf_report
+                .first_loss
+                .map_or("N/A".to_string(), |v| format!("{:.4}", v)),
+            tf_report
+                .final_loss
+                .map_or("N/A".to_string(), |v| format!("{:.4}", v)),
+            tf_report
+                .improvement_pct
+                .map_or("N/A".to_string(), |v| format!("{:.2}%", v)),
+            tf_report.top1_accuracy,
+            tf_report.top3_accuracy,
+            if tf_report.output_head_trained {
+                "trained"
+            } else {
+                "untrained"
+            },
+            if tf_report.ffn_trained {
+                "trained"
+            } else {
+                "untrained"
+            },
+            if tf_report.attention_frozen {
+                "frozen"
+            } else {
+                "trainable"
+            },
+            tf_report.max_gradient_norm_seen,
+            tf_report.avg_gradient_norm,
+            tf_report.clipped_updates,
+            tf_report.invalid_updates,
+            tf_report.unstable_updates,
+            if tf_report.rolled_back { "yes" } else { "no" },
         );
     }
 
@@ -1180,6 +1280,7 @@ fn cmd_predict_next(
     max_context: usize,
     top_k: usize,
     use_transformer: bool,
+    transformer_only: bool,
     brain_path: &Path,
 ) -> Result<(), ManasError> {
     let brain = ManasBrain::new(brain_path);
@@ -1216,13 +1317,17 @@ fn cmd_predict_next(
             let hidden_dim = (embed_dim * 2).max(8);
             TransformerPredictor::new(embed_dim, hidden_dim, max_context)
         };
-        transformer_predictor.predict_top_k_assisted(
-            &network,
-            &trainer.embedder,
-            &seq_memory,
-            &tokens,
-            top_k,
-        )
+        if transformer_only {
+            transformer_predictor.predict_top_k_transformer(&trainer.embedder, &tokens, top_k)
+        } else {
+            transformer_predictor.predict_top_k_assisted(
+                &network,
+                &trainer.embedder,
+                &seq_memory,
+                &tokens,
+                top_k,
+            )
+        }
     } else {
         let predictor = NextTokenPredictor::new(max_context);
         predictor.predict_top_k_with_memory(
