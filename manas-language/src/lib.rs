@@ -462,6 +462,12 @@ impl TransformerLanguageModel {
 
     /// Save the model to a sidecar binary file.
     pub fn save_to_file(&self, path: &Path) -> Result<(), ManasError> {
+        if !is_finite_model(self) {
+            return Err(ManasError::GrowthFailed(
+                "refusing to save non-finite transformer model".to_string(),
+            ));
+        }
+
         let mut buf = Vec::new();
         let vsize = self.vocab_size() as u32;
 
@@ -808,6 +814,7 @@ impl TransformerPredictor {
                 .collect()
         };
 
+        scored.retain(|(_, score)| score.is_finite());
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         scored
@@ -884,6 +891,7 @@ impl TransformerPredictor {
             })
             .collect();
 
+        scored.retain(|(_, score)| score.is_finite());
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         scored
@@ -1059,6 +1067,13 @@ pub struct TransformerTrainReport {
     pub clipped_updates: usize,
     pub unstable_updates: usize,
     pub rolled_back: bool,
+    // v0.9.4 attention-specific safety fields
+    pub attention_update_attempts: usize,
+    pub attention_updates_applied: usize,
+    pub attention_clipped_updates: usize,
+    pub attention_invalid_updates: usize,
+    pub max_attention_grad_norm: f32,
+    pub avg_attention_grad_norm: f32,
 }
 
 /// Train the network on next-token prediction and populate the sequence memory.
@@ -1403,20 +1418,35 @@ fn record_attention_train_step(
     report: &mut TransformerTrainReport,
     grad_norm_sum: &mut f32,
     grad_norm_count: &mut usize,
+    attention_grad_norm_sum: &mut f32,
+    attention_grad_norm_count: &mut usize,
     step: &crate::attention::AttentionTrainStepReport,
 ) {
-    if step.grad_norm.is_finite() {
-        if step.grad_norm > report.max_gradient_norm_seen {
-            report.max_gradient_norm_seen = step.grad_norm;
+    if step.attempted {
+        report.attention_update_attempts += 1;
+    }
+    if step.applied {
+        report.attention_updates_applied += 1;
+    }
+    if step.grad_norm_before_clip.is_finite() {
+        if step.grad_norm_before_clip > report.max_gradient_norm_seen {
+            report.max_gradient_norm_seen = step.grad_norm_before_clip;
         }
-        *grad_norm_sum += step.grad_norm;
+        if step.grad_norm_before_clip > report.max_attention_grad_norm {
+            report.max_attention_grad_norm = step.grad_norm_before_clip;
+        }
+        *grad_norm_sum += step.grad_norm_before_clip;
         *grad_norm_count += 1;
+        *attention_grad_norm_sum += step.grad_norm_before_clip;
+        *attention_grad_norm_count += 1;
     }
     if step.clipped {
         report.clipped_updates += 1;
+        report.attention_clipped_updates += 1;
     }
     if step.invalid {
         report.invalid_updates += 1;
+        report.attention_invalid_updates += 1;
     }
 }
 
@@ -1457,6 +1487,12 @@ pub fn train_transformer_output_head_with_safety(
         clipped_updates: 0,
         unstable_updates: 0,
         rolled_back: false,
+        attention_update_attempts: 0,
+        attention_updates_applied: 0,
+        attention_clipped_updates: 0,
+        attention_invalid_updates: 0,
+        max_attention_grad_norm: 0.0,
+        avg_attention_grad_norm: 0.0,
     };
 
     if examples.is_empty() || model.vocab_size() == 0 {
@@ -1476,6 +1512,9 @@ pub fn train_transformer_output_head_with_safety(
     let mut epoch_losses: Vec<f32> = Vec::new();
     let mut grad_norm_sum = 0.0;
     let mut grad_norm_count = 0usize;
+    let mut attention_grad_norm_sum = 0.0;
+    let mut attention_grad_norm_count = 0usize;
+    let mut rollback_for_unstable_loss = false;
 
     for _epoch_idx in 0..epochs {
         let mut epoch_loss = 0.0;
@@ -1664,6 +1703,8 @@ pub fn train_transformer_output_head_with_safety(
                 &mut report,
                 &mut grad_norm_sum,
                 &mut grad_norm_count,
+                &mut attention_grad_norm_sum,
+                &mut attention_grad_norm_count,
                 &attention_o_report,
             );
             if attention_o_report.applied {
@@ -1686,6 +1727,8 @@ pub fn train_transformer_output_head_with_safety(
                 &mut report,
                 &mut grad_norm_sum,
                 &mut grad_norm_count,
+                &mut attention_grad_norm_sum,
+                &mut attention_grad_norm_count,
                 &attention_v_report,
             );
             if attention_v_report.applied {
@@ -1711,6 +1754,8 @@ pub fn train_transformer_output_head_with_safety(
                 &mut report,
                 &mut grad_norm_sum,
                 &mut grad_norm_count,
+                &mut attention_grad_norm_sum,
+                &mut attention_grad_norm_count,
                 &attention_qk_report,
             );
             if attention_qk_report.applied {
@@ -1736,6 +1781,7 @@ pub fn train_transformer_output_head_with_safety(
                 && avg_epoch_loss > epoch_losses[0] * safety.loss_explosion_factor
             {
                 report.unstable_updates += epoch_count;
+                rollback_for_unstable_loss = true;
             }
         }
     }
@@ -1744,9 +1790,12 @@ pub fn train_transformer_output_head_with_safety(
     if grad_norm_count > 0 {
         report.avg_gradient_norm = grad_norm_sum / grad_norm_count as f32;
     }
+    if attention_grad_norm_count > 0 {
+        report.avg_attention_grad_norm = attention_grad_norm_sum / attention_grad_norm_count as f32;
+    }
 
     // ── Rollback if model is corrupted ───────────────────────────────
-    if !is_finite_model(model) || count == 0 {
+    if !is_finite_model(model) || count == 0 || rollback_for_unstable_loss {
         if let Some(ref snap) = original_model
             && safety.rollback_on_unstable
         {
@@ -2143,6 +2192,55 @@ mod tests {
             path: path.to_path_buf(),
             source: e,
         })
+    }
+
+    fn assert_transformer_snapshot_restored(
+        model: &TransformerLanguageModel,
+        snapshot: &TransformerLanguageModel,
+    ) {
+        assert_eq!(model.output_w, snapshot.output_w, "output_w mismatch");
+        assert_eq!(model.output_b, snapshot.output_b, "output_b mismatch");
+        assert_eq!(
+            model.block.feed_forward.w1, snapshot.block.feed_forward.w1,
+            "FFN w1 mismatch"
+        );
+        assert_eq!(
+            model.block.feed_forward.b1, snapshot.block.feed_forward.b1,
+            "FFN b1 mismatch"
+        );
+        assert_eq!(
+            model.block.feed_forward.w2, snapshot.block.feed_forward.w2,
+            "FFN w2 mismatch"
+        );
+        assert_eq!(
+            model.block.feed_forward.b2, snapshot.block.feed_forward.b2,
+            "FFN b2 mismatch"
+        );
+        assert_eq!(
+            model.block.attention.w_o, snapshot.block.attention.w_o,
+            "attention w_o mismatch"
+        );
+        assert_eq!(
+            model.block.attention.w_v, snapshot.block.attention.w_v,
+            "attention w_v mismatch"
+        );
+        assert_eq!(
+            model.block.attention.w_q, snapshot.block.attention.w_q,
+            "attention w_q mismatch"
+        );
+        assert_eq!(
+            model.block.attention.w_k, snapshot.block.attention.w_k,
+            "attention w_k mismatch"
+        );
+        assert_eq!(model.ffn_trained, snapshot.ffn_trained, "FFN flag mismatch");
+        assert_eq!(
+            model.attention_trained, snapshot.attention_trained,
+            "attention flag mismatch"
+        );
+        assert_eq!(
+            model.attention_projection_mask, snapshot.attention_projection_mask,
+            "attention projection mask mismatch"
+        );
     }
 
     // ── Sequence example tests ────────────────────────────────────────────
@@ -2708,6 +2806,39 @@ mod tests {
                 score
             );
         }
+    }
+
+    #[test]
+    fn transformer_prediction_filters_non_finite_scores() {
+        use std::collections::HashMap;
+
+        let mut table = HashMap::new();
+        table.insert(10u32, vec![1.0, 0.0, 0.0, 0.0]);
+        table.insert(20u32, vec![0.0, 1.0, 0.0, 0.0]);
+        let embedder = Embedder { dim: 4, table };
+
+        let network = Network::new();
+        let mut seq_memory = SequenceMemory::new();
+        seq_memory.record(&[10], 20);
+
+        let mut predictor = TransformerPredictor::new(4, 8, 5);
+        predictor.vocab_order = vec![10, 20];
+        predictor.output_w = vec![0.0; 8];
+        predictor.output_b = vec![f32::NAN, 0.0];
+
+        let transformer_only = predictor.predict_top_k_transformer(&embedder, &[10], 2);
+        assert!(
+            transformer_only.iter().all(|(_, score)| score.is_finite()),
+            "transformer-only scores should all be finite: {:?}",
+            transformer_only
+        );
+
+        let assisted = predictor.predict_top_k_assisted(&network, &embedder, &seq_memory, &[10], 2);
+        assert!(
+            assisted.iter().all(|(_, score)| score.is_finite()),
+            "assisted scores should all be finite: {:?}",
+            assisted
+        );
     }
 
     /// Test D: transformer-assisted generate does not panic and produces
@@ -4094,6 +4225,12 @@ mod tests {
             clipped_updates: 0,
             unstable_updates: 0,
             rolled_back: false,
+            attention_update_attempts: 0,
+            attention_updates_applied: 0,
+            attention_clipped_updates: 0,
+            attention_invalid_updates: 0,
+            max_attention_grad_norm: 0.0,
+            avg_attention_grad_norm: 0.0,
         };
         if let (Some(f), Some(l)) = (report.first_loss, report.final_loss)
             && f.abs() > 1e-10
@@ -4136,6 +4273,12 @@ mod tests {
             clipped_updates: 0,
             unstable_updates: 0,
             rolled_back: false,
+            attention_update_attempts: 0,
+            attention_updates_applied: 0,
+            attention_clipped_updates: 0,
+            attention_invalid_updates: 0,
+            max_attention_grad_norm: 0.0,
+            avg_attention_grad_norm: 0.0,
         };
 
         // This should not panic
@@ -4179,6 +4322,12 @@ mod tests {
             clipped_updates: 0,
             unstable_updates: 0,
             rolled_back: false,
+            attention_update_attempts: 3,
+            attention_updates_applied: 3,
+            attention_clipped_updates: 1,
+            attention_invalid_updates: 0,
+            max_attention_grad_norm: 2.0,
+            avg_attention_grad_norm: 1.0,
         };
 
         let formatted = format!(
@@ -4190,7 +4339,16 @@ mod tests {
              \x20 pure transformer top-3 accuracy  : {:.2}%\n\
              \x20 feed-forward    : {}\n\
              \x20 attention       : {}\n\
-             \x20 attention projections : {}\n",
+             \x20 attention projections : {}\n\
+             \n\
+             Attention safety\n\
+             \x20 projections trained              : {}\n\
+             \x20 attention update attempts        : {}\n\
+             \x20 attention updates applied        : {}\n\
+             \x20 attention clipped updates        : {}\n\
+             \x20 attention invalid updates        : {}\n\
+             \x20 max attention grad norm          : {:.4}\n\
+             \x20 avg attention grad norm          : {:.4}\n",
             report.epochs,
             report.language_lr,
             report.transformer_lr,
@@ -4213,6 +4371,13 @@ mod tests {
                 "trainable"
             },
             "o,v,q,k",
+            "o,v,q,k",
+            report.attention_update_attempts,
+            report.attention_updates_applied,
+            report.attention_clipped_updates,
+            report.attention_invalid_updates,
+            report.max_attention_grad_norm,
+            report.avg_attention_grad_norm,
         );
 
         assert!(
@@ -4246,6 +4411,14 @@ mod tests {
         assert!(
             formatted.contains("o,v,q,k"),
             "should contain projections 'o,v,q,k'"
+        );
+        assert!(
+            formatted.contains("Attention safety"),
+            "should contain 'Attention safety'"
+        );
+        assert!(
+            formatted.contains("attention update attempts"),
+            "should contain attention update attempts"
         );
     }
 
@@ -4426,6 +4599,101 @@ mod tests {
 
     // ── v0.8.2 Safety tests ─────────────────────────────────────────
 
+    #[test]
+    fn attention_safety_metrics_count_without_double_counting_global_counters() {
+        let mut report = TransformerTrainReport {
+            epochs: 1,
+            examples: 1,
+            language_lr: 0.01,
+            transformer_lr: 0.01,
+            avg_loss: 0.0,
+            first_loss: None,
+            final_loss: None,
+            improvement_pct: None,
+            top1_accuracy: 0.0,
+            top3_accuracy: 0.0,
+            output_head_trained: false,
+            ffn_trained: false,
+            attention_frozen: false,
+            attention_trained: true,
+            attention_projection_o_trained: true,
+            attention_projection_v_trained: true,
+            attention_projection_q_trained: true,
+            attention_projection_k_trained: true,
+            invalid_updates: 0,
+            max_gradient_norm_seen: 0.0,
+            avg_gradient_norm: 0.0,
+            clipped_updates: 0,
+            unstable_updates: 0,
+            rolled_back: false,
+            attention_update_attempts: 0,
+            attention_updates_applied: 0,
+            attention_clipped_updates: 0,
+            attention_invalid_updates: 0,
+            max_attention_grad_norm: 0.0,
+            avg_attention_grad_norm: 0.0,
+        };
+        let mut grad_norm_sum = 0.0;
+        let mut grad_norm_count = 0usize;
+        let mut attention_grad_norm_sum = 0.0;
+        let mut attention_grad_norm_count = 0usize;
+
+        let applied_clipped = crate::attention::AttentionTrainStepReport {
+            attempted: true,
+            applied: true,
+            clipped: true,
+            invalid: false,
+            grad_norm_before_clip: 2.0,
+            grad_norm: 2.0,
+        };
+        let applied = crate::attention::AttentionTrainStepReport {
+            attempted: true,
+            applied: true,
+            clipped: false,
+            invalid: false,
+            grad_norm_before_clip: 1.0,
+            grad_norm: 1.0,
+        };
+        let invalid = crate::attention::AttentionTrainStepReport {
+            attempted: true,
+            applied: false,
+            clipped: false,
+            invalid: true,
+            grad_norm_before_clip: f32::NAN,
+            grad_norm: f32::NAN,
+        };
+
+        for step in [&applied_clipped, &applied, &invalid] {
+            record_attention_train_step(
+                &mut report,
+                &mut grad_norm_sum,
+                &mut grad_norm_count,
+                &mut attention_grad_norm_sum,
+                &mut attention_grad_norm_count,
+                step,
+            );
+        }
+
+        assert_eq!(report.attention_update_attempts, 3);
+        assert_eq!(report.attention_updates_applied, 2);
+        assert_eq!(report.attention_clipped_updates, 1);
+        assert_eq!(report.attention_invalid_updates, 1);
+        assert_eq!(
+            report.clipped_updates, 1,
+            "global clipped count should not double-count"
+        );
+        assert_eq!(
+            report.invalid_updates, 1,
+            "global invalid count should not double-count"
+        );
+        assert_eq!(grad_norm_count, 2);
+        assert_eq!(attention_grad_norm_count, 2);
+        assert!((grad_norm_sum - 3.0).abs() < 1e-6);
+        assert!((attention_grad_norm_sum - 3.0).abs() < 1e-6);
+        assert!((report.max_gradient_norm_seen - 2.0).abs() < 1e-6);
+        assert!((report.max_attention_grad_norm - 2.0).abs() < 1e-6);
+    }
+
     /// Test A: gradient_norm([3, 4]) = 5.
     #[test]
     fn safety_gradient_norm() {
@@ -4488,10 +4756,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transformer_save_rejects_non_finite_model() {
+        let mut model = TransformerLanguageModel::new(4, 8, vec![10, 20, 30]);
+        model.block.attention.w_q[0] = f32::NAN;
+
+        let path = temp_test_path("transformer_non_finite_save_rejected.bin");
+        std::fs::remove_file(&path).ok();
+        let result = model.save_to_file(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert!(
+            matches!(result, Err(ManasError::GrowthFailed(_))),
+            "non-finite transformer save should fail, got {:?}",
+            result
+        );
+        assert!(
+            !path.exists(),
+            "non-finite save must not create transformer sidecar"
+        );
+    }
+
     /// Test E: rollback restores finite weights after corruption.
     #[test]
     fn safety_rollback_restores_finite() {
         let mut model = TransformerLanguageModel::new(4, 8, vec![10, 20, 30]);
+        model.ffn_trained = true;
+        model.mark_attention_projection_o_trained();
+        model.mark_attention_projection_v_trained();
+        model.mark_attention_projection_q_trained();
+        model.mark_attention_projection_k_trained();
         let snapshot = snapshot_model(&model);
         // Simulate corruption
         let last = model.output_w.len() - 1;
@@ -4507,46 +4801,59 @@ mod tests {
         // Rollback
         restore_model(&mut model, &snapshot);
         assert!(is_finite_model(&model), "should be finite after rollback");
-        // Verify weights are identical
-        for (a, b) in model.output_w.iter().zip(snapshot.output_w.iter()) {
-            assert!((a - b).abs() < 1e-6, "weights should match after rollback");
-        }
-        for (a, b) in model
-            .block
-            .attention
-            .w_q
-            .iter()
-            .zip(snapshot.block.attention.w_q.iter())
-        {
-            assert!((a - b).abs() < 1e-6, "w_q should match after rollback");
-        }
-        for (a, b) in model
-            .block
-            .attention
-            .w_k
-            .iter()
-            .zip(snapshot.block.attention.w_k.iter())
-        {
-            assert!((a - b).abs() < 1e-6, "w_k should match after rollback");
-        }
-        for (a, b) in model
-            .block
-            .attention
-            .w_o
-            .iter()
-            .zip(snapshot.block.attention.w_o.iter())
-        {
-            assert!((a - b).abs() < 1e-6, "w_o should match after rollback");
-        }
-        for (a, b) in model
-            .block
-            .attention
-            .w_v
-            .iter()
-            .zip(snapshot.block.attention.w_v.iter())
-        {
-            assert!((a - b).abs() < 1e-6, "w_v should match after rollback");
-        }
+        assert_transformer_snapshot_restored(&model, &snapshot);
+    }
+
+    #[test]
+    fn safety_epoch_loss_explosion_rolls_back_when_enabled() {
+        let mut network = Network::new();
+        let mut trainer = Trainer::new_with_params(32, 0.01, 0.5);
+        let mut seq_memory = SequenceMemory::new();
+        let text = "Rust is a systems programming language";
+
+        train_next_token_examples(
+            &mut network,
+            &mut trainer,
+            &mut seq_memory,
+            text,
+            5,
+            5,
+            0.05,
+            5,
+        )
+        .unwrap();
+
+        let embed_dim = trainer.embedder.dim;
+        let hidden_dim = (embed_dim * 2).max(8);
+        let mut vocab_order: Vec<u32> = trainer.embedder.table.keys().copied().collect();
+        vocab_order.sort();
+        let tokens = trainer.tokenizer.encode(text);
+        let examples = build_sequence_examples(&tokens, 5);
+        let mut model = TransformerLanguageModel::new(embed_dim, hidden_dim, vocab_order);
+        let snapshot = snapshot_model(&model);
+
+        let report = train_transformer_output_head_with_safety(
+            &mut model,
+            &trainer.embedder,
+            &examples,
+            5,
+            2,
+            0.05,
+            0.05,
+            &TransformerTrainingSafety {
+                max_gradient_norm: 5.0,
+                max_loss: 50.0,
+                loss_explosion_factor: 0.0,
+                rollback_on_unstable: true,
+            },
+        );
+
+        assert!(report.rolled_back, "loss explosion should trigger rollback");
+        assert!(
+            report.unstable_updates > 0,
+            "loss explosion should be counted as unstable"
+        );
+        assert_transformer_snapshot_restored(&model, &snapshot);
     }
 
     /// Test F: normal training with default safety — no rollback, generation works.
