@@ -294,13 +294,11 @@ Goal achieved:
 
 ---
 
-## Next Milestones
-
-## v0.8.2 — Safer Transformer Training
+### v0.8.2 — Safer Transformer Training
 
 Before training deeper parts of the transformer, training safety was improved.
 
-### Completed Safety Features
+Completed:
 
 - **`TransformerTrainingSafety` config** — `max_gradient_norm` (5.0), `max_loss` (50.0), `loss_explosion_factor` (5.0), `rollback_on_unstable` (true)
 - **Norm-based gradient clipping** — `gradient_norm()` / `clip_by_norm()` helper functions applied to both output head and FFN gradients
@@ -313,38 +311,13 @@ Before training deeper parts of the transformer, training safety was improved.
 - **6 new tests** (A: gradient norm, B: norm clipping, C: finite fresh model, D: NaN detection, E: rollback, F: normal training unchanged; 54 total)
 - All generation, prediction, default non-transformer path unchanged
 
-### CLI Output Example
-
-```text
-Transformer training
-  epochs                           : 100
-  examples                         : 10
-  language lr                      : 0.0500
-  transformer lr                   : 0.0500
-  avg train loss                   : 0.0749
-  first epoch loss                 : 2.4240
-  final epoch loss                 : 0.0069
-  improvement                      : 99.72%
-  pure transformer top-1 accuracy  : 100.00%
-  pure transformer top-3 accuracy  : 100.00%
-  output head                      : trained
-  feed-forward                     : trained
-  attention                        : frozen
-
-Training safety
-  max grad norm before clipping    : 1.2345
-  avg grad norm                    : 0.1234
-  clipped updates                  : 0
-  invalid updates                  : 0
-  unstable updates                 : 0
-  rolled back                      : no
-```
-
-### Goal
+Goal achieved:
 
 > Transformer training is now safer with gradient norm clipping, loss explosion detection, and rollback.
 
 ---
+
+## Next Milestones
 
 ## v0.9 — Train Attention Projections
 
