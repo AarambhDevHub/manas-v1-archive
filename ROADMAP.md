@@ -849,33 +849,58 @@ Goal achieved:
 
 ## Next Milestones
 
-## v1.0 — Stable Mini Local Language Model Release
+## v1.0 — Stable Local AI Memory Release
 
-This is the first stable language milestone.
+This is the first stable local AI memory release milestone. It should stabilize the current local-first workflow rather than add another experimental storage layer or model architecture.
 
-### Should Include
+Stable v1.0 workflow:
 
-- `train-language`
-- `predict-next`
-- `generate`
-- `--use-transformer`
-- `--train-transformer`
-- Controlled neuron growth
-- Persistent brain + sidecars
-- Better inspect output
-- Transformer output-head training
-- FFN training and partial `w_o`/`w_v`/`w_q`/`w_k` attention training if stable
-- Unified `teach` command for local text/file/folder teaching
-- Clean README examples
-- Strong tests
+```txt
+teach -> source memory -> source index -> ask/query --answer
+```
+
+### Stabilization Goals
+
+- Stable `teach` workflow for text, `.md` files, `.txt` files, and folders
+- Stable `ask` and `query --answer` workflow for local source-backed answers
+- Stable local source memory behavior through `brain.manas.sources`
+- Stable source index fallback behavior through `brain.manas.sourceindex`
+- Clean `inspect --verbose` and `files` output for local storage visibility
+- Clean CLI help output
+- Clean README quickstart
+- Storage layout documentation
+- Manual validation guide
+- Linux x86_64 GitHub release binary
+- One-command Linux install script
+- macOS and Windows source-build instructions
+- GitHub tag-based release automation
+
+### Release Strategy
+
+v1.0 ships the Linux x86_64 binary release first:
+
+```txt
+manas-linux-x86_64.tar.gz
+```
+
+Linux users can install with the release binary or one-command install script.
+
+macOS and Windows prebuilt binaries are future release improvements. macOS and Windows users can build from source for v1.0.
+
+Future releases may add:
+
+- macOS x86_64 / aarch64 release binaries
+- Windows x86_64 release binary
+- Docker image
+- crates.io publishing
 
 ### Honest Claim
 
-> Manas can locally learn small text sequences and generate text using a custom Rust memory + transformer-assisted language path.
+> Manas can teach local text/files/folders into local memory, persist source-backed evidence, build a local source index, and answer simple questions from local evidence without cloud APIs.
 
 ### Not a Claim
 
-Manas should not claim to be a ChatGPT replacement.
+Manas should not claim to be a ChatGPT replacement or a general-purpose hosted LLM.
 
 ---
 
@@ -1024,5 +1049,5 @@ Manas should continue following these principles:
 The next coding milestone is:
 
 ```text
-v1.0 — Stable Mini Local Language Model Release
+v1.0 — Stable Local AI Memory Release
 ```

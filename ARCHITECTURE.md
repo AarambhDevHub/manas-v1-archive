@@ -130,7 +130,8 @@ Input Sources
                              ▼
                    ┌────────────────┐
                    │  manas-store   │  ← custom .manas binary + .manas.seq,
-                   │  (.manas file, │     .manas.transformer, .manas.langmeta
+                   │  (.manas file, │     .manas.transformer, .manas.langmeta,
+                   │                │     .manas.sources, .manas.sourceindex
                    │   read/write,  │     append-only growth
                    │   append)      │     full neuron metadata
                    └────────────────┘
@@ -196,7 +197,7 @@ Input Sources
 │                   │ • .manas.langmeta I/O                 │             │
 │                   └──────────────────────────────────────┘             │
 │                                      │                                 │
-│         [brain.manas + brain.manas.seq + brain.manas.transformer + brain.manas.langmeta]                │
+│         [brain.manas + brain.manas.seq + brain.manas.transformer + brain.manas.langmeta + sources + index]│
 │                    starts: ~1 KB                                       │
 │                    grows:  incrementally                               │
 └────────────────────────────────────────────────────────────────────────┘
@@ -1386,23 +1387,43 @@ answer composer:
 
 This path is local-only. It does not construct the agent search pipeline, call web search, use hosted LLM APIs, or use external embedding services.
 
-v0.9.8 source-memory flow:
+Stable v1.0 local memory flow:
 
 ```txt
 teach file/text/folder
+  -> core memory
+  -> sequence memory
+  -> transformer memory
   -> split into chunks
   -> store original chunk text
   -> store normalized searchable text
   -> store token strings
   -> store source path/label + stable fingerprints
-  -> train core memory, sequence memory, and optional transformer as before
+  -> rebuild source index
 
 ask / query --answer
-  -> search persisted source memory first
-  -> rank using normalized text and token strings
+  -> source index first
+  -> source memory scan fallback
+  -> original file fallback
+  -> no-answer if no evidence
   -> output answer using original chunk text
   -> show stored source path
 ```
+
+Stable v1.0 storage layout:
+
+```txt
+brain.manas              -> core neural memory
+brain.manas.seq          -> sequence memory / token transitions
+brain.manas.transformer  -> transformer weights
+brain.manas.langmeta     -> language metadata
+brain.manas.sources      -> AI-ready persisted source memory
+brain.manas.sourceindex  -> token-to-source/chunk inverted index
+```
+
+`brain.manas.sources` is the source of truth for persisted source chunks. It stores original chunk text for answer output, normalized searchable text, token strings, source paths, fingerprints, and metadata.
+
+`brain.manas.sourceindex` is a derived cache/index. It maps source-memory tokens to source/chunk references for faster local retrieval and can be rebuilt from `brain.manas.sources`.
 
 ### Existing query/search path
 
@@ -1542,6 +1563,7 @@ No panics in library code. The CLI converts errors to user-friendly messages.
 | M28 | **Local query answering (v0.9.7)** — `manas ask`, `query --answer`, local `.md`/`.txt` source snippet ranking, extracted answers, source display, and no-evidence fallback | `manas-cli` | Questions can be answered from taught local source memory |
 | M29 | **AI-ready persistent source memory (v0.9.8)** — `brain.manas.sources`, original chunk text, normalized text, token strings, source paths, fingerprints, and sidecar-first answer retrieval | `manas-cli` | Answers survive moved/deleted source files and retrieval has structured local evidence |
 | M30 | **Source memory ranking + inverted index (v0.9.9)** — `brain.manas.sourceindex`, token-to-source/chunk lookup, top-k evidence ranking, stale chunk detection, and scan fallback | `manas-cli` | Source-backed answers stay fast and reliable as taught chunks grow |
+| M31 | **Stable Local AI Memory Release (v1.0)** — stable `teach`/`ask`/`query --answer`, source memory/index fallback, storage docs, Linux release binary, install script, and tag-based GitHub release automation | docs, release automation | First stable local AI memory release |
 
 ---
 

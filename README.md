@@ -22,70 +22,146 @@
 
 ---
 
-## Quick Start
+## Installation
+
+### Linux: one-command install
 
 ```bash
-# Learn from text
-manas learn "Rust is a systems programming language with zero-cost abstractions"
-
-# Teach text, one file, or a folder through core memory + sequence memory
-manas teach "Manas is written in Rust"
-manas teach ./notes.md --train-transformer
-manas teach ./my-notes/ --dry-run
-
-# Ask a local question from taught source memory
-manas ask "What is Manas?"
-
-# Low-level next-token training (v0.2)
-manas train-language "Rust is a systems programming language" --epochs 50
-
-# Train next-token prediction with transformer output head + FFN + attention w_o/w_v/w_q/w_k (v0.7-v0.9.5)
-manas train-language "Rust is a systems programming language" --epochs 50 --train-transformer
-
-# Train with growth control (v0.7.1) — cap new neurons, or disable growth entirely
-manas train-language "Rust is a systems programming language" --epochs 50 --max-new-neurons 5
-manas train-language "Duplicate text" --epochs 50 --no-grow
-
-# Predict the next word (default: hybrid memory + neural)
-manas predict-next "Rust is a" --top-k 5
-
-# Predict next word with experimental transformer assistance (v0.6)
-manas predict-next "Rust is a" --use-transformer --top-k 5
-
-# Generate text (autoregressive, default: stable v0.3)
-manas generate "Rust is a" --max-tokens 10
-
-# Generate text with experimental transformer assistance (v0.6)
-manas generate "Rust is a" --use-transformer --max-tokens 10
-
-# Low-level source-aware file/folder ingestion
-manas ingest --folder ./my-notes/
-manas ingest --file ./article.md
-
-# Learn from the internet
-manas ingest --url https://doc.rust-lang.org/book/
-
-# Query the web and learn automatically
-manas query "latest Rust version features"
-
-# See brain statistics
-manas inspect
-
-# Keep knowledge fresh
-manas refresh --category fast
-
-# List all ingested files
-manas files
-
-# Show activated neurons + decoded keywords for a topic
-manas trace "Rust ownership"
-
-# Show neurons with their source metadata
-manas neurons --all
-
-# Set freshness category
-manas tag "Rust version" --freshness fast
+curl -fsSL https://raw.githubusercontent.com/AarambhDevHub/manas/main/install.sh | sh
 ```
+
+This downloads the latest Linux x86_64 release binary from GitHub Releases and installs it as:
+
+```txt
+/usr/local/bin/manas
+```
+
+Verify:
+
+```bash
+manas --help
+```
+
+### Linux: manual install
+
+```bash
+curl -fsSL https://github.com/AarambhDevHub/manas/releases/latest/download/manas-linux-x86_64.tar.gz -o manas-linux-x86_64.tar.gz
+tar -xzf manas-linux-x86_64.tar.gz
+chmod +x manas-linux-x86_64
+sudo mv manas-linux-x86_64 /usr/local/bin/manas
+manas --help
+```
+
+### macOS: build from source
+
+Manas does not ship a macOS binary yet.
+
+Install Rust first:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Then build Manas:
+
+```bash
+git clone https://github.com/AarambhDevHub/manas.git
+cd manas
+cargo build --workspace --release
+sudo cp target/release/manas /usr/local/bin/manas
+manas --help
+```
+
+### Windows: build from source
+
+Manas does not ship a Windows binary yet.
+
+Install Rust from:
+
+```txt
+https://rustup.rs/
+```
+
+Then in PowerShell:
+
+```powershell
+git clone https://github.com/AarambhDevHub/manas.git
+cd manas
+cargo build --workspace --release
+.\target\release\manas.exe --help
+```
+
+Optional: add `target\release` to PATH or copy `manas.exe` to a folder already in PATH.
+
+### Build from source on Linux
+
+```bash
+git clone https://github.com/AarambhDevHub/manas.git
+cd manas
+cargo build --workspace --release
+sudo cp target/release/manas /usr/local/bin/manas
+manas --help
+```
+
+---
+
+## Quickstart
+
+Create a local teaching file:
+
+```bash
+mkdir -p teach
+
+cat > teach/identity.md <<'EOF'
+Manas is a local-first AI memory system written in Rust.
+Manas learns from text and files.
+Manas stores persistent memory locally.
+Manas is not a ChatGPT clone.
+EOF
+```
+
+Teach Manas:
+
+```bash
+manas teach teach/identity.md --train-transformer
+```
+
+Ask from local memory:
+
+```bash
+manas ask "What is Manas?"
+```
+
+Use local answer mode through query:
+
+```bash
+manas query "What is Manas?" --answer
+```
+
+Inspect local memory:
+
+```bash
+manas inspect --verbose
+```
+
+---
+
+## Local Storage
+
+Manas stores memory locally using sidecar files:
+
+```txt
+brain.manas              -> core neural memory
+brain.manas.seq          -> sequence memory / token transitions
+brain.manas.transformer  -> transformer weights
+brain.manas.langmeta     -> language metadata
+brain.manas.sources      -> AI-ready persisted source memory
+brain.manas.sourceindex  -> token-to-source/chunk inverted index
+```
+
+`brain.manas.sources` is the source of truth for persisted source chunks.
+
+`brain.manas.sourceindex` is a derived cache/index used for faster local retrieval.
 
 ---
 
@@ -370,20 +446,37 @@ manas tag "topic" --freshness cat         Set freshness category
 
 ---
 
-## Installation
+## Release
 
-### Prerequisites
+Manas v1.0.0 ships a Linux x86_64 binary through GitHub Releases.
 
-- Rust 2024 edition (Rust 1.85+)
-- Cargo
-
-### Build from source
+Create a release by pushing a version tag:
 
 ```bash
-git clone https://github.com/AarambhDevHub/manas.git
-cd manas
-cargo build --release
-./target/release/manas --help
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+GitHub Actions will build and attach:
+
+```txt
+manas-linux-x86_64.tar.gz
+```
+
+Do not create the release manually.
+
+## Release Checklist
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --release
+
+git checkout main
+git pull origin main
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 ---
