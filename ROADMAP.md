@@ -905,8 +905,6 @@ Manas should not claim to be a ChatGPT replacement or a general-purpose hosted L
 
 ---
 
-## Next Milestones
-
 ### v1.0.1 — Backprop Stability and Teach Data Refresh
 
 This patch release stabilizes training after the larger `teach/` dataset exposed a backpropagation target/output length mismatch.
@@ -928,6 +926,8 @@ This patch release stabilizes training after the larger `teach/` dataset exposed
 > Manas can teach a richer `teach/` folder without crashing from target/output length mismatch, and the default teaching data is cleaner for source-backed local answers.
 
 ---
+
+## Next Milestones
 
 ### v1.1.0 — Transformer Answer Fallback for Learned Reasoning
 
