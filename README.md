@@ -1,4 +1,6 @@
-# Manas
+# Manas — v1 (Archived)
+
+> **This repository is archived.** Manas v2 is in development at [github.com/AarambhDevHub/manas](https://github.com/AarambhDevHub/manas).
 
 > *मनस् (manas) — mind, intellect, the seat of thought*
 
